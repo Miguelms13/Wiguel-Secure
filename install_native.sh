@@ -134,11 +134,64 @@ def ensure_ollama_model():
         print("\n[Debug] Error creando modelo: " + str(e))
         return False
 
-def query_ollama(prompt):
-    """Consulta el modelo en Ollama verfificando que 'ollama serve' esté activo."""
+def query_ollama_stream(prompt):
+    """Consulta el modelo en Ollama con STREAMING activo para evitar el timeout de 2 minutos en Termux/CPU."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
-        # Intentar iniciar ollama serve en segundo plano si está disponible el comando
+        try:
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(2)
+            ollama_ok = check_ollama_status()
+        except Exception:
+            pass
+
+    if not ollama_ok:
+        return False
+
+    ensure_ollama_model()
+
+    url = "http://localhost:11434/api/generate"
+    payload = {
+        "model": "wiguel-ai",
+        "prompt": prompt,
+        "system": get_system_prompt(),
+        "stream": True,
+        "options": {
+            "temperature": 0.3,
+            "num_ctx": 2048,
+            "num_predict": 1024
+        }
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line.decode("utf-8"))
+                    text_chunk = chunk.get("response", "")
+                    if text_chunk:
+                        sys.stdout.write(text_chunk)
+                        sys.stdout.flush()
+                    if chunk.get("done", False):
+                        break
+                except Exception:
+                    pass
+            print() # Nueva línea al finalizar
+            return True
+    except Exception as e:
+        print(f"\n[Timeout/Error Streaming Ollama]: {e}")
+        return False
+
+def query_ollama(prompt):
+    """Consulta no-streamed con timeout extendido para análisis."""
+    ollama_ok = check_ollama_status()
+    if not ollama_ok:
         try:
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
@@ -159,7 +212,7 @@ def query_ollama(prompt):
         "stream": False,
         "options": {
             "temperature": 0.3,
-            "num_ctx": 4096
+            "num_ctx": 2048
         }
     }
     try:
@@ -168,7 +221,7 @@ def query_ollama(prompt):
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:
             res = json.loads(resp.read().decode("utf-8"))
             return res.get("response", "").strip()
     except Exception:
@@ -236,21 +289,16 @@ wiguel-ai> ")
                 if not user_input.strip():
                     continue
                 
-                print("Wiguel-AI> Razonando...", end="
-", flush=True)
+                print("Wiguel-AI> ", end="", flush=True)
                 
-                response_text = query_ollama(user_input)
+                success = query_ollama_stream(user_input)
                 
-                if not response_text:
+                if not success:
                     response_text = run_llama_cpp_fallback(user_input)
-                
-                if not response_text:
-                    response_text = "[Razonamiento Wiguel-AI]: Error de conexión con Ollama. Verifica que esté ejecutándose (ollama serve) y el modelo esté creado."
-                
-                # Limpiar la línea de "Razonando..."
-                print(" " * 40, end="
-")
-                print(f"Wiguel-AI> {response_text}")
+                    if response_text:
+                        print(f"{response_text}\n")
+                    else:
+                        print("[Error Wiguel-AI]: Error de conexión con Ollama o tiempo de respuesta agotado.\n")
             except KeyboardInterrupt:
                 print("
 Sesión terminada.")
