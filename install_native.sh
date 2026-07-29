@@ -21,26 +21,25 @@ mkdir -p "$MODEL_DIR"
 
 echo "[1/4] Verificando entorno Python3, Curl, Ollama y Acelerador Multihilo..."
 if ! command -v python3 &> /dev/null || ! command -v aria2c &> /dev/null; then
-    echo "Instalando dependencias recomendadas para descarga acelerada..."
+    echo "Instalando dependencias mínimas para descarga acelerada..."
     if command -v pkg &> /dev/null; then
-        pkg update && pkg install -y python python-pip curl aria2 || true
+        pkg install -y python curl aria2 || true
     elif command -v apt-get &> /dev/null; then
-        sudo apt-get update && sudo apt-get install -y python3 python3-pip curl aria2 || true
+        sudo apt-get install -y --no-install-recommends python3 curl aria2 || true
     elif command -v brew &> /dev/null; then
         brew install python curl aria2 || true
     fi
 fi
 
-# Instalar dependencias python para llama-cpp-python y requests
-python3 -m pip install llama-cpp-python requests 2>/dev/null || true
+# El ejecutable utiliza la biblioteca estándar de Python (urllib/json), sin necesidad de compilar dependencias C++ pesadas (pip).
 
 echo "[2/4] Descargando modelo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
 if [ ! -f "$MODEL_FILE" ]; then
     echo "URL: $MODEL_URL"
     if command -v aria2c &> /dev/null; then
-        echo "🚀 Ejecutando motor aria2c multihilo (16 conexiones en paralelo)..."
-        aria2c -x 16 -s 16 -k 1M -d "$MODEL_DIR" -o "Wiguel-AI.gguf" "$MODEL_URL" || {
+        echo "🚀 Ejecutando motor aria2c multihilo (16 conexiones en paralelo sin preasignación)..."
+        aria2c -x 16 -s 16 -k 1M --file-allocation=none -d "$MODEL_DIR" -o "Wiguel-AI.gguf" "$MODEL_URL" || {
             echo "Aria2c falló, reintentando con curl..."
             curl -L -C - --retry 3 "$MODEL_URL" -o "$MODEL_FILE" --progress-bar
         }
