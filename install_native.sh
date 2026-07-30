@@ -61,6 +61,7 @@ import os
 import json
 import time
 import base64
+import re
 import subprocess
 import urllib.request
 import urllib.error
@@ -72,10 +73,18 @@ INSTALL_DIR = os.path.expanduser("~/.wiguel-ai")
 MODEL_PATH = os.path.join(INSTALL_DIR, "models", "Wiguel-AI.gguf")
 
 # Hidden System Prompt (Base64 Encoded to prevent plain text exposure in scripts/files)
-SYSTEM_PROMPT_B64 = "WW91IGFyZSBXaWd1ZWwtQUksIGFuIGV4cGVydCBjeWJlcnNlY3VyaXR5IGFuZCBnZW5lcmFsIHJlYXNvbmluZyBBSSBtb2RlbCBidWlsdCBmb3IgdGhyZWF0IGFuYWx5c2lzLCBjb2RlIGF1ZGl0aW5nLCB2dWxuZXJhYmlsaXR5IGlkZW50aWZpY2F0aW9uLCBhbmQgaW50ZXJhY3RpdmUgY2hhdC4gVGhpbmsgc3RlcCBieSBzdGVwIGFuZCBwcm92aWRlIGRlZXAsIHdlbGwtcmVhc29uZWQgYW5zd2Vycy4="
+# Explicitly instructs the model NOT to output <think> tags or internal reasoning steps.
+SYSTEM_PROMPT_B64 = "WW91IGFyZSBXaWd1ZWwtQUksIGFuIGV4cGVydCBjeWJlcnNlY3VyaXR5IGFuZCBnZW5lcmFsIHJlYXNvbmluZyBBSSBtb2RlbCBidWlsdCBmb3IgdGhyZWF0IGFuYWx5c2lzLCBjb2RlIGF1ZGl0aW5nLCB2dWxuZXJhYmlsaXR5IGlkZW50aWZpY2F0aW9uLCBhbmQgaW50ZXJhY3RpdmUgY2hhdC4gRE8gTk9UI3ByaW50IG91dHB1dCBpbnRlcm5hbCByZWFzb25pbmcgb3IgPHRoaW5rPiBibG9ja3MuIEdpdmUgeW91ciBmaW5hbCBoZWxwZnVsIGFuc3dlciBkaXJlY3RseS4="
 
 def get_system_prompt():
-    return base64.b64decode(SYSTEM_PROMPT_B64).decode("utf-8")
+    prompt = "You are Wiguel-AI, an expert cybersecurity and reasoning AI. Do NOT output <think> blocks or internal thoughts. Provide direct, clean responses only."
+    try:
+        decoded = base64.b64decode(SYSTEM_PROMPT_B64).decode("utf-8")
+        if decoded:
+            prompt = decoded
+    except Exception:
+        pass
+    return prompt
 
 def check_ollama_status():
     """Verifica si 'ollama serve' se está ejecutando en http://localhost:11434"""
@@ -173,6 +182,8 @@ def query_ollama_stream(prompt):
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
+        in_think = False
+        think_buffer = ""
         with urllib.request.urlopen(req, timeout=300) as resp:
             for line in resp:
                 if not line:
@@ -181,8 +192,22 @@ def query_ollama_stream(prompt):
                     chunk = json.loads(line.decode("utf-8"))
                     text_chunk = chunk.get("response", "")
                     if text_chunk:
-                        sys.stdout.write(text_chunk)
-                        sys.stdout.flush()
+                        if "<think>" in text_chunk:
+                            in_think = True
+                            text_chunk = text_chunk.split("<think>")[0]
+                        
+                        if in_think:
+                            think_buffer += text_chunk
+                            if "</think>" in think_buffer:
+                                text_chunk = think_buffer.split("</think>")[-1]
+                                in_think = False
+                                think_buffer = ""
+                            else:
+                                text_chunk = ""
+
+                        if text_chunk and not in_think:
+                            sys.stdout.write(text_chunk)
+                            sys.stdout.flush()
                     if chunk.get("done", False):
                         break
                 except Exception:
@@ -231,7 +256,9 @@ def query_ollama(prompt):
         )
         with urllib.request.urlopen(req, timeout=300) as resp:
             res = json.loads(resp.read().decode("utf-8"))
-            return res.get("response", "").strip()
+            raw = res.get("response", "").strip()
+            clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
+            return clean if clean else raw
     except Exception:
         return None
 
