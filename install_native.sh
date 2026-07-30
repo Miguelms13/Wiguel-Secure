@@ -20,7 +20,7 @@ mkdir -p "$BIN_DIR"
 mkdir -p "$MODEL_DIR"
 
 echo "[1/4] Verificando entorno Python3, Curl, Ollama y Acelerador Multihilo..."
-if ! command -v python3 &> /dev/null || ! command -v aria2c &> /dev/null; then
+if (! command -v python3 &> /dev/null && ! command -v python &> /dev/null) || ! command -v aria2c &> /dev/null; then
     echo "Instalando dependencias mínimas para descarga acelerada..."
     if command -v pkg &> /dev/null; then
         pkg install -y python curl aria2 || true
@@ -64,6 +64,9 @@ import base64
 import subprocess
 import urllib.request
 import urllib.error
+
+os.environ["OLLAMA_ORIGINS"] = "*"
+os.environ["OLLAMA_HOST"] = "0.0.0.0"
 
 INSTALL_DIR = os.path.expanduser("~/.wiguel-ai")
 MODEL_PATH = os.path.join(INSTALL_DIR, "models", "Wiguel-AI.gguf")
@@ -138,7 +141,10 @@ def query_ollama_stream(prompt):
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env_vars = dict(os.environ)
+            env_vars["OLLAMA_ORIGINS"] = "*"
+            env_vars["OLLAMA_HOST"] = "0.0.0.0"
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
             time.sleep(2)
             ollama_ok = check_ollama_status()
         except Exception:
@@ -192,7 +198,10 @@ def query_ollama(prompt):
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env_vars = dict(os.environ)
+            env_vars["OLLAMA_ORIGINS"] = "*"
+            env_vars["OLLAMA_HOST"] = "0.0.0.0"
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
             time.sleep(2)
             ollama_ok = check_ollama_status()
         except Exception:
@@ -280,8 +289,7 @@ def main():
         
         while True:
             try:
-                user_input = input("
-wiguel-ai> ")
+                user_input = input("\nwiguel-ai> ")
                 if user_input.strip().lower() in ['exit', 'salir', 'quit']:
                     print("Sesión finalizada. Wiguel-Secure activo.")
                     break
@@ -299,12 +307,10 @@ wiguel-ai> ")
                     else:
                         print("[Error Wiguel-AI]: Error de conexión con Ollama o tiempo de respuesta agotado.\n")
             except KeyboardInterrupt:
-                print("
-Sesión terminada.")
+                print("\nSesión terminada.")
                 break
             except Exception as e:
-                print(f"
-[Error]: {e}")
+                print(f"\n[Error]: {e}")
                 
     elif command in ["--analyze", "-a", "analyze"] and file_to_analyze:
         file_target = file_to_analyze
@@ -317,11 +323,8 @@ Sesión terminada.")
                 prompt = (
                     f"Analyze the following code/file '{filename}' for cybersecurity threats. "
                     f"Return ONLY valid JSON with keys 'risk_score' (0-100), 'is_safe' (boolean), "
-                    f"'status_title' (string), 'explanation' (string), 'detected_patterns' (list of strings).
-
-"
-                    f"Content:
-{content}"
+                    f"'status_title' (string), 'explanation' (string), 'detected_patterns' (list of strings).\n\n"
+                    f"Content:\n{content}"
                 )
                 
                 raw_res = query_ollama(prompt)
@@ -362,6 +365,8 @@ EOF
 # Launcher Script
 cat << 'EOF' > "$BIN_DIR/wiguel-ai"
 #!/usr/bin/env bash
+export OLLAMA_ORIGINS="*"
+export OLLAMA_HOST="0.0.0.0"
 PYTHON_BIN=$(command -v python3 || command -v python)
 SCRIPT_PATH="$HOME/.wiguel-ai/wiguel_runner.py"
 
@@ -392,6 +397,13 @@ if ! grep -q ".wiguel-ai/bin" "$SHELL_RC" 2>/dev/null; then
     echo 'alias wiguel="wiguel-ai"' >> "$SHELL_RC"
 fi
 
+if ! grep -q "OLLAMA_ORIGINS" "$SHELL_RC" 2>/dev/null; then
+    echo 'export OLLAMA_ORIGINS="*"' >> "$SHELL_RC"
+    echo 'export OLLAMA_HOST="0.0.0.0"' >> "$SHELL_RC"
+fi
+
+export OLLAMA_ORIGINS="*"
+export OLLAMA_HOST="0.0.0.0"
 export PATH="$HOME/.wiguel-ai/bin:$PATH"
 
 echo "================================================================="
