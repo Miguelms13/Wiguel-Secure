@@ -167,7 +167,7 @@ def ensure_ollama_model():
     # Si no existe el archivo GGUF local, usamos un modelo base ligero de ollama como fallback
     sys_prompt = get_system_prompt()
     model_path_clean = MODEL_PATH.replace("\\", "/")
-    modelfile_content = "FROM \"" + model_path_clean + "\"\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
+    modelfile_content = "FROM " + model_path_clean + "\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
     
     if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 10000000:
         try:
@@ -198,10 +198,10 @@ def ensure_ollama_model():
         with urllib.request.urlopen(req, timeout=120) as resp:
             return resp.status == 200
     except Exception as e:
-        print("\n[Debug] Error creando modelo: " + str(e))
+        err_msg = e.read().decode("utf-8") if hasattr(e, "read") else str(e); print("\n[Debug] Error creando modelo: " + err_msg)
         return False
 
-def query_ollama_stream(prompt):
+def query_ollama_stream(prompt_or_messages):
     """Consulta el modelo en Ollama con STREAMING activo para evitar el timeout de 2 minutos en Termux/CPU."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
@@ -220,11 +220,11 @@ def query_ollama_stream(prompt):
 
     ensure_ollama_model()
 
-    url = "http://localhost:11434/api/generate"
+    is_chat = isinstance(prompt_or_messages, list)
+    url = "http://localhost:11434/api/chat" if is_chat else "http://localhost:11434/api/generate"
+    
     payload = {
         "model": "wiguel-ai",
-        "prompt": prompt,
-        "system": get_system_prompt(),
         "stream": True,
         "options": {
             "temperature": 0.3,
@@ -232,6 +232,12 @@ def query_ollama_stream(prompt):
             "num_predict": 1024
         }
     }
+    if is_chat:
+        payload["messages"] = prompt_or_messages
+    else:
+        payload["prompt"] = prompt_or_messages
+        payload["system"] = get_system_prompt()
+
     try:
         req = urllib.request.Request(
             url,
@@ -239,37 +245,39 @@ def query_ollama_stream(prompt):
             headers={"Content-Type": "application/json"}
         )
         in_think = False
-        think_buffer = ""
+        full_response = ""
         with urllib.request.urlopen(req, timeout=300) as resp:
             for line in resp:
                 if not line:
                     continue
                 try:
                     chunk = json.loads(line.decode("utf-8"))
-                    text_chunk = chunk.get("response", "")
+                    text_chunk = chunk.get("message", {}).get("content", "") if is_chat else chunk.get("response", "")
                     if text_chunk:
-                        if "<think>" in text_chunk:
-                            in_think = True
-                            text_chunk = text_chunk.split("<think>")[0]
-                        
-                        if in_think:
-                            think_buffer += text_chunk
-                            if "</think>" in think_buffer:
-                                text_chunk = think_buffer.split("</think>")[-1]
-                                in_think = False
-                                think_buffer = ""
+                        while text_chunk:
+                            if not in_think:
+                                if "<think>" in text_chunk:
+                                    pre, text_chunk = text_chunk.split("<think>", 1)
+                                    sys.stdout.write(pre)
+                                    full_response += pre
+                                    in_think = True
+                                else:
+                                    sys.stdout.write(text_chunk)
+                                    full_response += text_chunk
+                                    text_chunk = ""
                             else:
-                                text_chunk = ""
-
-                        if text_chunk and not in_think:
-                            sys.stdout.write(text_chunk)
-                            sys.stdout.flush()
+                                if "</think>" in text_chunk:
+                                    _, text_chunk = text_chunk.split("</think>", 1)
+                                    in_think = False
+                                else:
+                                    text_chunk = ""
+                        sys.stdout.flush()
                     if chunk.get("done", False):
                         break
                 except Exception:
                     pass
             print() # Nueva línea al finalizar
-            return True
+            return full_response if is_chat else True
     except Exception as e:
         print(f"\n[Timeout/Error Streaming Ollama]: {e}")
         return False
@@ -371,6 +379,7 @@ def main():
         print("   Escribe 'exit' o 'salir' para finalizar")
         print("==================================================")
         
+        chat_history = [{"role": "system", "content": get_system_prompt()}]
         while True:
             try:
                 user_input = input("\nwiguel-ai> ")
@@ -382,19 +391,26 @@ def main():
                 
                 print("Wiguel-AI> ", end="", flush=True)
                 
-                success = query_ollama_stream(user_input)
+                chat_history.append({"role": "user", "content": user_input})
+                success = query_ollama_stream(chat_history)
                 
-                if not success:
+                if success:
+                    chat_history.append({"role": "assistant", "content": success})
+                else:
                     response_text = run_llama_cpp_fallback(user_input)
                     if response_text:
                         print(f"{response_text}\n")
+                        chat_history.append({"role": "assistant", "content": response_text})
                     else:
                         print("[Error Wiguel-AI]: Error de conexión con Ollama o tiempo de respuesta agotado.\n")
+                        chat_history.pop() # remove failed user message
             except KeyboardInterrupt:
                 print("\nSesión terminada.")
                 break
             except Exception as e:
                 print(f"\n[Error]: {e}")
+                if len(chat_history) > 1 and chat_history[-1]["role"] == "user":
+                    chat_history.pop()
                 
     elif command in ["--analyze", "-a", "analyze"] and file_to_analyze:
         file_target = file_to_analyze
