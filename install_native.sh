@@ -43,8 +43,6 @@ if ! command -v ollama &> /dev/null; then
     fi
 fi
 
-# El ejecutable utiliza la biblioteca estándar de Python (urllib/json), sin necesidad de compilar dependencias C++ pesadas (pip).
-
 echo "[2/4] Descargando modelo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
 FILE_SIZE=0
@@ -97,7 +95,7 @@ else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
 
-echo "[3/4] Configurando ejecutable nativo Wiguel-AI (Verificando Ollama / llama-cpp)..."
+echo "[3/4] Configurando ejecutable nativo Wiguel-AI..."
 
 cat << 'EOF' > "$INSTALL_DIR/wiguel_runner.py"
 #!/usr/bin/env python3
@@ -118,8 +116,7 @@ INSTALL_DIR = os.path.expanduser("~/.wiguel-ai")
 MODEL_PATH = os.path.join(INSTALL_DIR, "models", "Wiguel-AI.gguf")
 
 # Hidden System Prompt (Base64 Encoded to prevent plain text exposure in scripts/files)
-# Explicitly instructs the model NOT to output <think> tags or internal reasoning steps.
-SYSTEM_PROMPT_B64 = "WW91IGFyZSBXaWd1ZWwtQUksIGFuIGV4cGVydCBjeWJlcnNlY3VyaXR5IGFuZCBnZW5lcmFsIHJlYXNvbmluZyBBSSBtb2RlbCBidWlsdCBmb3IgdGhyZWF0IGFuYWx5c2lzLCBjb2RlIGF1ZGl0aW5nLCB2dWxuZXJhYmlsaXR5IGlkZW50aWZpY2F0aW9uLCBhbmQgaW50ZXJhY3RpdmUgY2hhdC4gRE8gTk9UI3ByaW50IG91dHB1dCBpbnRlcm5hbCByZWFzb25pbmcgb3IgPHRoaW5rPiBibG9ja3MuIEdpdmUgeW91ciBmaW5hbCBoZWxwZnVsIGFuc3dlciBkaXJlY3RseS4="
+SYSTEM_PROMPT_B64 = "WW91IGFyZSBXaWd1ZWwtQUksIGFuIGV4cGVydCBjeWJlcnNlY3VyaXR5IGFuZCBnZW5lcmFsIHJlYXNvbmluZyBBSSBtb2RlbCBidWlsdCBmb3IgdGhyZWF0IGFuYWx5c2lzLCBjb2RlIGF1ZGl0aW5nLCB2dWxuZXJhYmlsaXR5IGlkZW50aWZpY2F0aW9uLCBhbmQgaW50ZXJhY3RpdmUgY2hhdC4gRE8gTk9UI3ByaW50IG91dHB1dCBpbnRlcm5hbCByZWFzb25pbmcgb3IgPHRoaW5rPiBibG9ja3MuIEdpdmUgeW91ciBmaW5hbGBoZWxwZnVsIGFuc3dlciBkaXJlY3RseS4="
 
 def get_system_prompt():
     prompt = "You are Wiguel-AI, an expert cybersecurity and reasoning AI. Do NOT output <think> blocks or internal thoughts. Provide direct, clean responses only."
@@ -131,15 +128,6 @@ def get_system_prompt():
         pass
     return prompt
 
-def strip_think_tags(text):
-    if not text:
-        return ""
-    # Strip full <think>...</think> blocks as well as unclosed <think>... blocks
-    cleaned = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', text, flags=re.DOTALL)
-    # Strip any lingering stray tags
-    cleaned = cleaned.replace('<think>', '').replace('</think>', '')
-    return cleaned.strip()
-
 def check_ollama_status():
     """Verifica si 'ollama serve' se está ejecutando en http://localhost:11434"""
     try:
@@ -150,7 +138,7 @@ def check_ollama_status():
         return False
 
 def ensure_ollama_model():
-    """Registra dinámicamente el modelo 'wiguel-ai' en Ollama."""
+    """Registra dinámicamente el modelo 'wiguel-ai' en Ollama desde la memoria sin Modelfile visible."""
     if not check_ollama_status():
         return False
         
@@ -165,15 +153,28 @@ def ensure_ollama_model():
         pass
 
     sys_prompt = get_system_prompt()
-    model_path_clean = MODEL_PATH.replace("\\", "/")
-    modelfile_content = "FROM " + model_path_clean + "\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
+    
+    if os.path.exists(MODEL_PATH):
+        modelfile_content = f"FROM {MODEL_PATH}\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
+    else:
+        try:
+            print("[Wiguel-AI] Configurando modelo base en Ollama (puede tardar unos segundos)...")
+            req_pull = urllib.request.Request(
+                "http://localhost:11434/api/pull",
+                data=json.dumps({"name": "Wiguel-AI"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req_pull, timeout=120) as resp:
+                pass
+        except Exception:
+            pass
+        modelfile_content = f"FROM Wiguel-AI\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
 
     try:
         url = "http://localhost:11434/api/create"
         payload = {
             "model": "wiguel-ai",
-            "modelfile": modelfile_content,
-            "stream": False
+            "modelfile": modelfile_content
         }
         req = urllib.request.Request(
             url,
@@ -181,27 +182,19 @@ def ensure_ollama_model():
             headers={"Content-Type": "application/json"}
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            if "error" in res:
-                print(f"\n[Debug] Error de Ollama al crear modelo: {res['error']}")
-                return False
-            return True
+            return resp.status == 200
     except Exception as e:
-        err_msg = e.read().decode("utf-8") if hasattr(e, "read") else str(e)
-        print(f"\n[Debug] Error creando modelo (API): {err_msg}")
+        print("\n[Debug] Error creando modelo: " + str(e))
         return False
 
-def query_ollama(prompt_or_messages, stream=False):
-    """Consulta el modelo en Ollama."""
+def query_ollama_stream(prompt_or_messages):
+    """Consulta el modelo en Ollama con STREAMING activo (soporta string prompt o lista de mensajes chat)."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
             env_vars = dict(os.environ)
             env_vars["OLLAMA_ORIGINS"] = "*"
             env_vars["OLLAMA_HOST"] = "0.0.0.0"
-            if "com.termux" in os.environ.get("PREFIX", ""):
-                lib_path = "/data/data/com.termux/files/usr/lib/ollama"
-                env_vars["LD_LIBRARY_PATH"] = lib_path + ":" + env_vars.get("LD_LIBRARY_PATH", "")
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
             time.sleep(2)
             ollama_ok = check_ollama_status()
@@ -209,23 +202,22 @@ def query_ollama(prompt_or_messages, stream=False):
             pass
 
     if not ollama_ok:
-        return None
+        return False
 
-    if not ensure_ollama_model():
-        return None
+    ensure_ollama_model()
 
     is_chat = isinstance(prompt_or_messages, list)
     url = "http://localhost:11434/api/chat" if is_chat else "http://localhost:11434/api/generate"
     
     payload = {
         "model": "wiguel-ai",
-        "stream": stream,
+        "stream": True,
         "options": {
             "temperature": 0.3,
-            "num_ctx": 2048
+            "num_ctx": 2048,
+            "num_predict": 1024
         }
     }
-    
     if is_chat:
         payload["messages"] = prompt_or_messages
     else:
@@ -238,63 +230,94 @@ def query_ollama(prompt_or_messages, stream=False):
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        if stream:
-            in_think = False
-            full_response = ""
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                for line in resp:
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line.decode("utf-8"))
-                        if "error" in chunk:
-                            print(f"\n[Error Ollama]: {chunk['error']}")
-                            return None
-                        text_chunk = chunk.get("message", {}).get("content", "") if is_chat else chunk.get("response", "")
-                        if text_chunk:
-                            while text_chunk:
-                                if not in_think:
-                                    if "<think>" in text_chunk:
-                                        pre, text_chunk = text_chunk.split("<think>", 1)
-                                        sys.stdout.write(pre)
-                                        full_response += pre
-                                        in_think = True
-                                    else:
-                                        sys.stdout.write(text_chunk)
-                                        full_response += text_chunk
-                                        text_chunk = ""
-                                else:
-                                    if "</think>" in text_chunk:
-                                        _, text_chunk = text_chunk.split("</think>", 1)
-                                        in_think = False
-                                    else:
-                                        text_chunk = ""
+        in_think = False
+        think_buffer = ""
+        full_response = ""
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            for line in resp:
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line.decode("utf-8"))
+                    text_chunk = chunk.get("message", {}).get("content", "") if is_chat else chunk.get("response", "")
+                    if text_chunk:
+                        if "<think>" in text_chunk:
+                            in_think = True
+                            text_chunk = text_chunk.split("<think>")[0]
+                        
+                        if in_think:
+                            think_buffer += text_chunk
+                            if "</think>" in think_buffer:
+                                text_chunk = think_buffer.split("</think>")[-1]
+                                in_think = False
+                                think_buffer = ""
+                            else:
+                                text_chunk = ""
+
+                        if text_chunk and not in_think:
+                            sys.stdout.write(text_chunk)
                             sys.stdout.flush()
-                        if chunk.get("done", False):
-                            break
-                    except Exception:
-                        pass
-                print() # Nueva línea al finalizar
-                return full_response
-        else:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
-                if "error" in res:
-                    print(f"\n[Error Ollama]: {res['error']}")
-                    return None
-                raw = res.get("message", {}).get("content", "").strip() if is_chat else res.get("response", "").strip()
-                clean = strip_think_tags(raw)
-                return clean if clean else strip_think_tags(raw)
+                            full_response += text_chunk
+                    
+                    if chunk.get("done", False):
+                        break
+                except Exception:
+                    pass
+            print() # Nueva línea al finalizar
+            return full_response if full_response else True
     except Exception as e:
-        if stream:
-            print(f"\n[Timeout/Error Streaming Ollama]: {e}")
+        print(f"\n[Timeout/Error Streaming Ollama]: {e}")
+        return False
+
+def query_ollama(prompt):
+    """Consulta no-streamed con timeout extendido para análisis."""
+    ollama_ok = check_ollama_status()
+    if not ollama_ok:
+        try:
+            env_vars = dict(os.environ)
+            env_vars["OLLAMA_ORIGINS"] = "*"
+            env_vars["OLLAMA_HOST"] = "0.0.0.0"
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
+            time.sleep(2)
+            ollama_ok = check_ollama_status()
+        except Exception:
+            pass
+
+    if not ollama_ok:
+        return None
+
+    ensure_ollama_model()
+
+    url = "http://localhost:11434/api/generate"
+    payload = {
+        "model": "wiguel-ai",
+        "prompt": prompt,
+        "system": get_system_prompt(),
+        "stream": False,
+        "options": {
+            "temperature": 0.3,
+            "num_ctx": 2048
+        }
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            raw = res.get("response", "").strip()
+            clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
+            return clean if clean else raw
+    except Exception:
         return None
 
 def run_llama_cpp_fallback(prompt):
     """Respaldo mediante llama-cpp-python"""
     try:
         from llama_cpp import Llama
-        if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 10000000:
+        if not os.path.exists(MODEL_PATH):
             return None
         llm = Llama(model_path=MODEL_PATH, n_ctx=2048, verbose=False)
         prompt_formatted = f"<|im_start|>system\n{get_system_prompt()}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -304,8 +327,9 @@ def run_llama_cpp_fallback(prompt):
             temperature=0.3,
             stop=["<|im_end|>", "<|im_start|>"]
         )
-        raw_text = output["choices"][0]["text"].strip()
-        return strip_think_tags(raw_text)
+        raw = output["choices"][0]["text"].strip()
+        clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
+        return clean if clean else raw
     except Exception:
         return None
 
@@ -339,11 +363,25 @@ def main():
         if ollama_running:
             print("   [Estado Servidor]: Ollama Serve -> ACTIVO (http://localhost:11434)")
         else:
-            print("   [Estado Servidor]: ⚠️ 'ollama serve' NO detectado. Ejecuta 'ollama serve' para mejor rendimiento.")
+            print("   [Estado Servidor]: ⚠️ 'ollama serve' NO detectado. Intentando iniciar...")
+            try:
+                env_vars = dict(os.environ)
+                env_vars["OLLAMA_ORIGINS"] = "*"
+                env_vars["OLLAMA_HOST"] = "0.0.0.0"
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
+                time.sleep(3)
+            except Exception:
+                pass
+            if check_ollama_status():
+                print("   [Estado Servidor]: Ollama Serve -> ACTIVO (http://localhost:11434)")
+            else:
+                print("   [Estado Servidor]: (Modo Offline / Asistente Local de Respaldo activado)")
+                
         print("   Escribe 'exit' o 'salir' para finalizar")
         print("==================================================")
         
         chat_history = [{"role": "system", "content": get_system_prompt()}]
+        
         while True:
             try:
                 user_input = input("\nwiguel-ai> ")
@@ -353,29 +391,27 @@ def main():
                 if not user_input.strip():
                     continue
                 
+                chat_history.append({"role": "user", "content": user_input})
                 print("Wiguel-AI> ", end="", flush=True)
                 
-                chat_history.append({"role": "user", "content": user_input})
-                response_text = query_ollama(chat_history, stream=True)
-                success = response_text
+                resp_val = query_ollama_stream(chat_history)
                 
-                if success:
-                    chat_history.append({"role": "assistant", "content": success})
+                if resp_val is not False:
+                    assistant_text = resp_val if isinstance(resp_val, str) else "OK"
+                    chat_history.append({"role": "assistant", "content": assistant_text})
                 else:
+                    chat_history.pop() # remove failed user message
                     response_text = run_llama_cpp_fallback(user_input)
                     if response_text:
                         print(f"{response_text}\n")
                         chat_history.append({"role": "assistant", "content": response_text})
                     else:
-                        print("[Error Wiguel-AI]: Error de conexión con Ollama o tiempo de respuesta agotado.\n")
-                        chat_history.pop() # remove failed user message
+                        print("[Error Wiguel-AI]: Error de conexión con Ollama o tiempo de respuesta agotado. Asegúrate de ejecutar 'ollama serve'.\n")
             except KeyboardInterrupt:
                 print("\nSesión terminada.")
                 break
             except Exception as e:
                 print(f"\n[Error]: {e}")
-                if len(chat_history) > 1 and chat_history[-1]["role"] == "user":
-                    chat_history.pop()
                 
     elif command in ["--analyze", "-a", "analyze"] and file_to_analyze:
         file_target = file_to_analyze
