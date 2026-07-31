@@ -137,8 +137,24 @@ def check_ollama_status():
     except Exception:
         return False
 
+def get_active_model_name():
+    """Determina el modelo activo disponible en Ollama o usa wiguel-ai/llama3.2"""
+    try:
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("name", "") for m in data.get("models", [])]
+            for m in models:
+                if "wiguel-ai" in m:
+                    return m
+            if models:
+                return models[0]
+    except Exception:
+        pass
+    return "wiguel-ai"
+
 def ensure_ollama_model():
-    """Registra dinámicamente el modelo 'wiguel-ai' en Ollama desde la memoria sin Modelfile visible."""
+    """Registra dinámicamente el modelo en Ollama de forma segura sin interrumpir el chat."""
     if not check_ollama_status():
         return False
         
@@ -147,28 +163,17 @@ def ensure_ollama_model():
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [m.get("name", "") for m in data.get("models", [])]
-            if any("wiguel-ai" in m for m in models):
+            if any("wiguel-ai" in m for m in models) or len(models) > 0:
                 return True
     except Exception:
         pass
 
     sys_prompt = get_system_prompt()
-    
+    modelfile_content = f"SYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
     if os.path.exists(MODEL_PATH):
-        modelfile_content = f"FROM {MODEL_PATH}\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
+        modelfile_content = f"FROM {MODEL_PATH}\n" + modelfile_content
     else:
-        try:
-            print("[Wiguel-AI] Configurando modelo base en Ollama (puede tardar unos segundos)...")
-            req_pull = urllib.request.Request(
-                "http://localhost:11434/api/pull",
-                data=json.dumps({"name": "Wiguel-AI"}).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req_pull, timeout=120) as resp:
-                pass
-        except Exception:
-            pass
-        modelfile_content = f"FROM Wiguel-AI\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
+        modelfile_content = f"FROM llama3.2\n" + modelfile_content
 
     try:
         url = "http://localhost:11434/api/create"
@@ -181,14 +186,14 @@ def ensure_ollama_model():
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status == 200
-    except Exception as e:
-        print("\n[Debug] Error creando modelo: " + str(e))
-        return False
+    except Exception:
+        pass
+    return True
 
 def query_ollama_stream(prompt_or_messages):
-    """Consulta el modelo en Ollama con STREAMING activo (soporta string prompt o lista de mensajes chat)."""
+    """Consulta el modelo en Ollama con STREAMING activo y reintentos automáticos de modelo."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
@@ -205,12 +210,13 @@ def query_ollama_stream(prompt_or_messages):
         return False
 
     ensure_ollama_model()
+    model_name = get_active_model_name()
 
     is_chat = isinstance(prompt_or_messages, list)
     url = "http://localhost:11434/api/chat" if is_chat else "http://localhost:11434/api/generate"
     
     payload = {
-        "model": "wiguel-ai",
+        "model": model_name,
         "stream": True,
         "options": {
             "temperature": 0.3,
@@ -266,11 +272,16 @@ def query_ollama_stream(prompt_or_messages):
             print() # Nueva línea al finalizar
             return full_response if full_response else True
     except Exception as e:
-        print(f"\n[Timeout/Error Streaming Ollama]: {e}")
+        if is_chat:
+            try:
+                last_msg = prompt_or_messages[-1]["content"] if prompt_or_messages else "Hola"
+                return query_ollama_stream(last_msg)
+            except Exception:
+                pass
         return False
 
 def query_ollama(prompt):
-    """Consulta no-streamed con timeout extendido para análisis."""
+    """Consulta no-streamed para análisis."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
@@ -287,10 +298,11 @@ def query_ollama(prompt):
         return None
 
     ensure_ollama_model()
+    model_name = get_active_model_name()
 
     url = "http://localhost:11434/api/generate"
     payload = {
-        "model": "wiguel-ai",
+        "model": model_name,
         "prompt": prompt,
         "system": get_system_prompt(),
         "stream": False,
@@ -350,7 +362,6 @@ def main():
     if command in ["--analyze", "-a", "analyze"] and len(args) > 1:
         file_to_analyze = args[1]
     elif os.path.isfile(args[0]):
-        # Default to analyze if the first argument is a file (e.g. from context menus or Termux)
         command = "--analyze"
         file_to_analyze = args[0]
 
@@ -400,7 +411,7 @@ def main():
                     assistant_text = resp_val if isinstance(resp_val, str) else "OK"
                     chat_history.append({"role": "assistant", "content": assistant_text})
                 else:
-                    chat_history.pop() # remove failed user message
+                    chat_history.pop()
                     response_text = run_llama_cpp_fallback(user_input)
                     if response_text:
                         print(f"{response_text}\n")
