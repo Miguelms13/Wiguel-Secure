@@ -171,6 +171,7 @@ def ensure_ollama_model():
     except Exception:
         pass
 
+    # Si no hay modelos, intentamos descargar automáticamente llama3.2 para que el chat funcione de inmediato
     try:
         print("[Wiguel-AI] Descargando modelo base 'llama3.2' en Ollama...")
         req_pull = urllib.request.Request(
@@ -206,6 +207,8 @@ def query_ollama_stream(prompt_or_messages):
     model_name = get_active_model_name()
 
     is_chat = isinstance(prompt_or_messages, list)
+    
+    # Intentamos primero con /api/chat o /api/generate
     urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
     
     for url in urls:
@@ -222,6 +225,7 @@ def query_ollama_stream(prompt_or_messages):
         if is_chat_endpoint:
             payload["messages"] = prompt_or_messages
         else:
+            # Si usamos /api/generate, convertimos messages a prompt plano
             if is_chat:
                 flat_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in prompt_or_messages])
             else:
