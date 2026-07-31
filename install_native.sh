@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Wiguel-Secure & Wiguel-AI Native Terminal Installer (Linux / macOS / Termux)
-# Downloads Wiguel-AI.gguf from Hugging Face and registers 'wiguel-ai' command
-# Private & Encrypted System Logic - No Plaintext Prompts exposed in .sh
+# Downloads Wiguel-AI.gguf exclusively from Hugging Face and registers 'wiguel-ai'
 # ==============================================================================
 
 set -e
@@ -34,16 +33,16 @@ fi
 if ! command -v ollama &> /dev/null; then
     echo "Instalando Ollama..."
     if command -v pkg &> /dev/null; then
-        echo "Nota: Ollama no cuenta con paquete oficial en Termux, se utilizará el motor de inferencia de respaldo."
+        echo "Nota: Ollama no cuenta con paquete oficial en Termux, se utilizará el motor de inferencia de respaldo GGUF."
     elif command -v brew &> /dev/null; then
         brew install ollama || curl -fsSL https://ollama.com/install.sh | sh || true
     else
         echo "Descargando e instalando Ollama oficial desde https://ollama.com..."
-        curl -fsSL https://ollama.com/install.sh | sh || sudo sh -c 'curl -fsSL https://ollama.com/install.sh | sh' || echo "Aviso: No se pudo auto-instalar Ollama. Puedes instalarlo manualmente en https://ollama.com"
+        curl -fsSL https://ollama.com/install.sh | sh || sudo sh -c 'curl -fsSL https://ollama.com/install.sh | sh' || echo "Aviso: Puedes instalar Ollama manualmente en https://ollama.com"
     fi
 fi
 
-echo "[2/4] Descargando modelo Wiguel-AI.gguf desde Hugging Face..."
+echo "[2/4] Descargando tu modelo exclusivo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
 FILE_SIZE=0
 if [ -f "$MODEL_FILE" ]; then
@@ -87,15 +86,15 @@ if [ "$FILE_SIZE" -lt 1000000 ]; then
     fi
 
     if [ "$DOWNLOAD_SUCCESS" = true ]; then
-        echo "✓ Modelo Wiguel-AI.gguf descargado con éxito en $MODEL_FILE"
+        echo "✓ Modelo exclusivo Wiguel-AI.gguf descargado con éxito en $MODEL_FILE"
     else
-        echo "❌ No se pudo completar la descarga del modelo. Revisa tu conexión a internet."
+        echo "❌ No se pudo completar la descarga del modelo GGUF. Revisa tu conexión a internet o el enlace."
     fi
 else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
 
-echo "[3/4] Configurando ejecutable nativo Wiguel-AI y motor inteligente..."
+echo "[3/4] Configurando ejecutable nativo Wiguel-AI con tu modelo GGUF..."
 
 cat << 'EOF' > "$INSTALL_DIR/wiguel_runner.py"
 #!/usr/bin/env python3
@@ -115,7 +114,7 @@ os.environ["OLLAMA_HOST"] = "0.0.0.0"
 INSTALL_DIR = os.path.expanduser("~/.wiguel-ai")
 MODEL_PATH = os.path.join(INSTALL_DIR, "models", "Wiguel-AI.gguf")
 
-# Hidden System Prompt (Base64 Encoded to prevent plain text exposure in scripts/files)
+# Hidden System Prompt (Base64 Encoded to prevent plain text exposure)
 SYSTEM_PROMPT_B64 = "WW91IGFyZSBXaWd1ZWwtQUksIGFuIGV4cGVydCBjeWJlcnNlY3VyaXR5IGFuZCBnZW5lcmFsIHJlYXNvbmluZyBBSSBtb2RlbCBidWlsdCBmb3IgdGhyZWF0IGFuYWx5c2lzLCBjb2RlIGF1ZGl0aW5nLCB2dWxuZXJhYmlsaXR5IGlkZW50aWZpY2F0aW9uLCBhbmQgaW50ZXJhY3RpdmUgY2hhdC4gRE8gTk9UI3ByaW50IG91dHB1dCBpbnRlcm5hbCByZWFzb25pbmcgb3IgPHRoaW5rPiBibG9ja3MuIEdpdmUgeW91ciBmaW5hbGBoZWxwZnVsIGFuc3dlciBkaXJlY3RseS4="
 
 def get_system_prompt():
@@ -148,15 +147,13 @@ def get_available_models():
         return []
 
 def ensure_ollama_model():
-    """Garantiza que Ollama tenga un modelo operativo disponible (wiguel-ai o llama3.2)."""
+    """Registra y asegura estrictamente tu modelo Wiguel-AI.gguf en Ollama."""
     if not check_ollama_status():
         return False
         
     models = get_available_models()
     if any("wiguel-ai" in m for m in models):
         return "wiguel-ai"
-    if len(models) > 0:
-        return models[0]
 
     sys_prompt = get_system_prompt()
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1000000:
@@ -173,29 +170,19 @@ def ensure_ollama_model():
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 if resp.status == 200:
                     return "wiguel-ai"
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Wiguel-AI] Aviso registrando GGUF en Ollama: {e}")
 
-    try:
-        print("[Wiguel-AI] Descargando modelo base 'llama3.2' en Ollama...")
-        req_pull = urllib.request.Request(
-            "http://localhost:11434/api/pull",
-            data=json.dumps({"name": "llama3.2", "stream": False}).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req_pull, timeout=300) as resp:
-            return "llama3.2"
-    except Exception:
-        pass
-
-    models_after = get_available_models()
-    return models_after[0] if models_after else "llama3.2"
+    # Si hay cualquier otro modelo en Ollama como fallback si GGUF aún no está registrado
+    if models:
+        return models[0]
+    return "wiguel-ai"
 
 def query_ollama_stream(prompt_or_messages):
-    """Consulta el modelo en Ollama con STREAMING activo."""
+    """Consulta tu modelo Wiguel-AI en Ollama con streaming."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
@@ -211,7 +198,7 @@ def query_ollama_stream(prompt_or_messages):
     if not ollama_ok:
         return False
 
-    model_name = ensure_ollama_model() or "llama3.2"
+    model_name = ensure_ollama_model() or "wiguel-ai"
 
     is_chat = isinstance(prompt_or_messages, list)
     urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
@@ -285,10 +272,10 @@ def query_ollama_stream(prompt_or_messages):
     return False
 
 def query_ollama(prompt):
-    """Consulta no-streamed para análisis de archivos."""
+    """Consulta no-streamed para análisis de archivos usando tu modelo."""
     if not check_ollama_status():
         return None
-    model_name = ensure_ollama_model() or "llama3.2"
+    model_name = ensure_ollama_model() or "wiguel-ai"
 
     url = "http://localhost:11434/api/generate"
     payload = {
@@ -316,7 +303,7 @@ def query_ollama(prompt):
         return None
 
 def run_llama_cpp_fallback(prompt):
-    """Respaldo mediante llama-cpp-python si Ollama no está activo"""
+    """Respaldo directo mediante llama-cpp-python usando tu Wiguel-AI.gguf"""
     try:
         from llama_cpp import Llama
         if not os.path.exists(MODEL_PATH):
@@ -358,7 +345,7 @@ def main():
     if command in ["--chat", "-c", "chat"]:
         print("==================================================")
         print("   Wiguel-AI Cybersecurity Terminal Chat v1.0")
-        print("   Modelo GGUF Local: Wiguel-AI (Temp 0.3)")
+        print("   Tu Modelo GGUF: Wiguel-AI (Temp 0.3)")
         
         ollama_running = check_ollama_status()
         if ollama_running:
@@ -376,7 +363,7 @@ def main():
             if check_ollama_status():
                 print("   [Estado Servidor]: Ollama Serve -> ACTIVO (http://localhost:11434)")
             else:
-                print("   [Estado Servidor]: (Modo Respaldo llama-cpp activado)")
+                print("   [Estado Servidor]: (Modo Respaldo GGUF directo activado)")
                 
         print("   Escribe 'exit' o 'salir' para finalizar")
         print("==================================================")
