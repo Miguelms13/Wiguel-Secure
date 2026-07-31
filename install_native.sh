@@ -184,21 +184,15 @@ def ensure_ollama_model():
         modelfile_content = "FROM llama3.2:1b\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
 
     try:
-        url = "http://localhost:11434/api/create"
-        payload = {
-            "name": "wiguel-ai",
-            "modelfile": modelfile_content,
-            "stream": False
-        }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.status == 200
+        tmp_file = os.path.join(INSTALL_DIR, "Modelfile.tmp")
+        with open(tmp_file, "w") as f:
+            f.write(modelfile_content)
+        subprocess.run(["ollama", "create", "wiguel-ai", "-f", tmp_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+        return True
     except Exception as e:
-        err_msg = e.read().decode("utf-8") if hasattr(e, "read") else str(e); print("\n[Debug] Error creando modelo: " + err_msg)
+        print(f"\n[Debug] Error creando modelo con CLI: {e}")
         return False
 
 def query_ollama_stream(prompt_or_messages):
