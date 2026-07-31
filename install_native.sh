@@ -138,7 +138,7 @@ def check_ollama_status():
         return False
 
 def get_active_model_name():
-    """Determina el modelo activo disponible en Ollama o usa wiguel-ai/llama3.2"""
+    """Determina el modelo activo disponible en Ollama o usa llama3.2"""
     try:
         req = urllib.request.Request("http://localhost:11434/api/tags")
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -147,14 +147,17 @@ def get_active_model_name():
             for m in models:
                 if "wiguel-ai" in m:
                     return m
+            for m in models:
+                if "llama3.2" in m or "llama3" in m or "phi" in m:
+                    return m
             if models:
                 return models[0]
     except Exception:
         pass
-    return "wiguel-ai"
+    return "llama3.2"
 
 def ensure_ollama_model():
-    """Registra dinámicamente el modelo en Ollama de forma segura sin interrumpir el chat."""
+    """Garantiza que Ollama tenga un modelo operativo disponible (pull automático de llama3.2 si está vacío)."""
     if not check_ollama_status():
         return False
         
@@ -163,37 +166,27 @@ def ensure_ollama_model():
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             models = [m.get("name", "") for m in data.get("models", [])]
-            if any("wiguel-ai" in m for m in models) or len(models) > 0:
+            if len(models) > 0:
                 return True
     except Exception:
         pass
 
-    sys_prompt = get_system_prompt()
-    modelfile_content = f"SYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
-    if os.path.exists(MODEL_PATH):
-        modelfile_content = f"FROM {MODEL_PATH}\n" + modelfile_content
-    else:
-        modelfile_content = f"FROM llama3.2\n" + modelfile_content
-
     try:
-        url = "http://localhost:11434/api/create"
-        payload = {
-            "model": "wiguel-ai",
-            "modelfile": modelfile_content
-        }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
+        print("[Wiguel-AI] Descargando modelo base 'llama3.2' en Ollama...")
+        req_pull = urllib.request.Request(
+            "http://localhost:11434/api/pull",
+            data=json.dumps({"name": "llama3.2", "stream": False}).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status == 200
+        with urllib.request.urlopen(req_pull, timeout=300) as resp:
+            return True
     except Exception:
         pass
+        
     return True
 
 def query_ollama_stream(prompt_or_messages):
-    """Consulta el modelo en Ollama con STREAMING activo y reintentos automáticos de modelo."""
+    """Consulta el modelo en Ollama con STREAMING activo."""
     ollama_ok = check_ollama_status()
     if not ollama_ok:
         try:
@@ -213,72 +206,75 @@ def query_ollama_stream(prompt_or_messages):
     model_name = get_active_model_name()
 
     is_chat = isinstance(prompt_or_messages, list)
-    url = "http://localhost:11434/api/chat" if is_chat else "http://localhost:11434/api/generate"
+    urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
     
-    payload = {
-        "model": model_name,
-        "stream": True,
-        "options": {
-            "temperature": 0.3,
-            "num_ctx": 2048,
-            "num_predict": 1024
+    for url in urls:
+        is_chat_endpoint = "chat" in url
+        payload = {
+            "model": model_name,
+            "stream": True,
+            "options": {
+                "temperature": 0.3,
+                "num_ctx": 2048,
+                "num_predict": 1024
+            }
         }
-    }
-    if is_chat:
-        payload["messages"] = prompt_or_messages
-    else:
-        payload["prompt"] = prompt_or_messages
-        payload["system"] = get_system_prompt()
+        if is_chat_endpoint:
+            payload["messages"] = prompt_or_messages
+        else:
+            if is_chat:
+                flat_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in prompt_or_messages])
+            else:
+                flat_prompt = prompt_or_messages
+            payload["prompt"] = flat_prompt
+            payload["system"] = get_system_prompt()
 
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        in_think = False
-        think_buffer = ""
-        full_response = ""
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            for line in resp:
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line.decode("utf-8"))
-                    text_chunk = chunk.get("message", {}).get("content", "") if is_chat else chunk.get("response", "")
-                    if text_chunk:
-                        if "<think>" in text_chunk:
-                            in_think = True
-                            text_chunk = text_chunk.split("<think>")[0]
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            in_think = False
+            think_buffer = ""
+            full_response = ""
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                for line in resp:
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line.decode("utf-8"))
+                        text_chunk = chunk.get("message", {}).get("content", "") if is_chat_endpoint else chunk.get("response", "")
+                        if text_chunk:
+                            if "<think>" in text_chunk:
+                                in_think = True
+                                text_chunk = text_chunk.split("<think>")[0]
+                            
+                            if in_think:
+                                think_buffer += text_chunk
+                                if "</think>" in think_buffer:
+                                    text_chunk = think_buffer.split("</think>")[-1]
+                                    in_think = False
+                                    think_buffer = ""
+                                else:
+                                    text_chunk = ""
+
+                            if text_chunk and not in_think:
+                                sys.stdout.write(text_chunk)
+                                sys.stdout.flush()
+                                full_response += text_chunk
                         
-                        if in_think:
-                            think_buffer += text_chunk
-                            if "</think>" in think_buffer:
-                                text_chunk = think_buffer.split("</think>")[-1]
-                                in_think = False
-                                think_buffer = ""
-                            else:
-                                text_chunk = ""
-
-                        if text_chunk and not in_think:
-                            sys.stdout.write(text_chunk)
-                            sys.stdout.flush()
-                            full_response += text_chunk
-                    
-                    if chunk.get("done", False):
-                        break
-                except Exception:
-                    pass
-            print() # Nueva línea al finalizar
-            return full_response if full_response else True
-    except Exception as e:
-        if is_chat:
-            try:
-                last_msg = prompt_or_messages[-1]["content"] if prompt_or_messages else "Hola"
-                return query_ollama_stream(last_msg)
-            except Exception:
-                pass
-        return False
+                        if chunk.get("done", False):
+                            break
+                    except Exception:
+                        pass
+                print()
+                if full_response:
+                    return full_response
+        except Exception:
+            continue
+            
+    return False
 
 def query_ollama(prompt):
     """Consulta no-streamed para análisis."""
