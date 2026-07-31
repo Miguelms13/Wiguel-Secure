@@ -31,6 +31,15 @@ if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
     fi
 fi
 
+if ! command -v ollama &> /dev/null; then
+    echo "Instalando Ollama..."
+    if command -v pkg &> /dev/null; then
+        echo "Ollama no es nativo en Termux de forma oficial, se utilizará llama.cpp-python como fallback interno."
+    else
+        curl -fsSL https://ollama.com/install.sh | sh || echo "Advertencia: No se pudo instalar Ollama automáticamente."
+    fi
+fi
+
 # El ejecutable utiliza la biblioteca estándar de Python (urllib/json), sin necesidad de compilar dependencias C++ pesadas (pip).
 
 echo "[2/4] Descargando modelo Wiguel-AI.gguf desde Hugging Face..."
