@@ -173,10 +173,9 @@ def ensure_ollama_model():
             with urllib.request.urlopen(req, timeout=180) as resp:
                 if resp.status == 200:
                     return "wiguel-ai"
-        except Exception as e:
-            print(f"[Wiguel-AI] Aviso registrando GGUF en Ollama: {e}")
+        except Exception:
+            pass
 
-    # Si hay cualquier otro modelo en Ollama como fallback si GGUF aún no está registrado
     if models:
         return models[0]
     return "wiguel-ai"
@@ -448,7 +447,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 EOF
 
 # Launcher Script
