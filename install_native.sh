@@ -11,7 +11,7 @@ echo "================================================================="
 echo "   Instalando Wiguel-Secure Native & Modelo Wiguel-AI (GGUF)     "
 echo "================================================================="
 
-MODEL_URL="https://huggingface.co/xMiguel11/Wiguel-AI-GGUF/resolve/main/Wiguel-AI.gguf"
+MODEL_URL="https://huggingface.co/Miguelms13/Wiguel-AI-GGUF/resolve/main/Wiguel-AI.gguf"
 INSTALL_DIR="$HOME/.wiguel-ai"
 BIN_DIR="$INSTALL_DIR/bin"
 MODEL_DIR="$INSTALL_DIR/models"
@@ -139,6 +139,8 @@ def strip_think_tags(text):
     # Strip any lingering stray tags
     cleaned = cleaned.replace('<think>', '').replace('</think>', '')
     return cleaned.strip()
+
+def check_ollama_status():
     """Verifica si 'ollama serve' se está ejecutando en http://localhost:11434"""
     try:
         req = urllib.request.Request("http://localhost:11434/api/tags", headers={"User-Agent": "Wiguel-Secure"})
@@ -172,10 +174,10 @@ def ensure_ollama_model():
             print("[Wiguel-AI] Configurando modelo base en Ollama (puede tardar unos segundos)...")
             req_pull = urllib.request.Request(
                 "http://localhost:11434/api/pull",
-                data=json.dumps({"name": "llama3.2:1b"}).encode("utf-8"),
+                data=json.dumps({"name": "llama3.2:1b", "stream": False}).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req_pull, timeout=120) as resp:
+            with urllib.request.urlopen(req_pull, timeout=300) as resp:
                 pass
         except Exception:
             pass
@@ -185,7 +187,8 @@ def ensure_ollama_model():
         url = "http://localhost:11434/api/create"
         payload = {
             "name": "wiguel-ai",
-            "modelfile": modelfile_content
+            "modelfile": modelfile_content,
+            "stream": False
         }
         req = urllib.request.Request(
             url,
