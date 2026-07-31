@@ -34,9 +34,12 @@ fi
 if ! command -v ollama &> /dev/null; then
     echo "Instalando Ollama..."
     if command -v pkg &> /dev/null; then
-        echo "Ollama no es nativo en Termux de forma oficial, se utilizará llama.cpp-python como fallback interno."
+        echo "Nota: Ollama no cuenta con paquete oficial en Termux, se utilizará el motor de inferencia de respaldo."
+    elif command -v brew &> /dev/null; then
+        brew install ollama || curl -fsSL https://ollama.com/install.sh | sh || true
     else
-        curl -fsSL https://ollama.com/install.sh | sh || echo "Advertencia: No se pudo instalar Ollama automáticamente."
+        echo "Descargando e instalando Ollama oficial desde https://ollama.com..."
+        curl -fsSL https://ollama.com/install.sh | sh || sudo sh -c 'curl -fsSL https://ollama.com/install.sh | sh' || echo "Aviso: No se pudo auto-instalar Ollama. Puedes instalarlo manualmente en https://ollama.com"
     fi
 fi
 
@@ -44,11 +47,52 @@ fi
 
 echo "[2/4] Descargando modelo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
-if [ ! -f "$MODEL_FILE" ]; then
+FILE_SIZE=0
+if [ -f "$MODEL_FILE" ]; then
+    FILE_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+fi
+
+if [ "$FILE_SIZE" -lt 1000000 ]; then
     echo "URL: $MODEL_URL"
-    echo "⚡ Usando curl con reintentos..."
-    curl -L -C - --retry 3 "$MODEL_URL" -o "$MODEL_FILE" --progress-bar
-    echo "✓ Modelo descargado con éxito en $MODEL_FILE"
+    rm -f "$MODEL_FILE"
+    
+    DOWNLOAD_SUCCESS=false
+    
+    if command -v curl &> /dev/null; then
+        echo "⚡ Descargando con curl..."
+        curl -sSL -A "Mozilla/5.0" -L --retry 5 --retry-delay 2 "$MODEL_URL" -o "$MODEL_FILE" --progress-bar || true
+        NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+        if [ "$NEW_SIZE" -gt 1000000 ]; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    fi
+    
+    if [ "$DOWNLOAD_SUCCESS" = false ] && command -v wget &> /dev/null; then
+        echo "⚡ Reintentando descarga con wget..."
+        wget --user-agent="Mozilla/5.0" -q --show-progress -O "$MODEL_FILE" "$MODEL_URL" || true
+        NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+        if [ "$NEW_SIZE" -gt 1000000 ]; then
+            DOWNLOAD_SUCCESS=true
+        fi
+    fi
+
+    if [ "$DOWNLOAD_SUCCESS" = false ]; then
+        echo "⚡ Reintentando descarga con Python..."
+        PYTHON_BIN=$(command -v python3 || command -v python || echo "")
+        if [ -n "$PYTHON_BIN" ]; then
+            $PYTHON_BIN -c "import urllib.request; req=urllib.request.Request('$MODEL_URL', headers={'User-Agent':'Mozilla/5.0'}); res=urllib.request.urlopen(req); open('$MODEL_FILE','wb').write(res.read())" || true
+            NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+            if [ "$NEW_SIZE" -gt 1000000 ]; then
+                DOWNLOAD_SUCCESS=true
+            fi
+        fi
+    fi
+
+    if [ "$DOWNLOAD_SUCCESS" = true ]; then
+        echo "✓ Modelo descargado con éxito en $MODEL_FILE"
+    else
+        echo "❌ No se pudo completar la descarga del modelo $MODEL_FILE. Revisa tu conexión a internet."
+    fi
 else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
@@ -87,7 +131,14 @@ def get_system_prompt():
         pass
     return prompt
 
-def check_ollama_status():
+def strip_think_tags(text):
+    if not text:
+        return ""
+    # Strip full <think>...</think> blocks as well as unclosed <think>... blocks
+    cleaned = re.sub(r'<think>[\s\S]*?(?:</think>|$)', '', text, flags=re.DOTALL)
+    # Strip any lingering stray tags
+    cleaned = cleaned.replace('<think>', '').replace('</think>', '')
+    return cleaned.strip()
     """Verifica si 'ollama serve' se está ejecutando en http://localhost:11434"""
     try:
         req = urllib.request.Request("http://localhost:11434/api/tags", headers={"User-Agent": "Wiguel-Secure"})
@@ -113,9 +164,10 @@ def ensure_ollama_model():
 
     # Si no existe el archivo GGUF local, usamos un modelo base ligero de ollama como fallback
     sys_prompt = get_system_prompt()
-    modelfile_content = "FROM " + MODEL_PATH + "\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
+    model_path_clean = MODEL_PATH.replace("\\", "/")
+    modelfile_content = "FROM \"" + model_path_clean + "\"\nSYSTEM \"\"\"" + sys_prompt + "\"\"\"\nPARAMETER temperature 0.3"
     
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 10000000:
         try:
             print("[Wiguel-AI] Configurando modelo base en Ollama (puede tardar unos segundos)...")
             req_pull = urllib.request.Request(
@@ -258,8 +310,8 @@ def query_ollama(prompt):
         with urllib.request.urlopen(req, timeout=300) as resp:
             res = json.loads(resp.read().decode("utf-8"))
             raw = res.get("response", "").strip()
-            clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
-            return clean if clean else raw
+            clean = strip_think_tags(raw)
+            return clean if clean else strip_think_tags(raw)
     except Exception:
         return None
 
@@ -267,7 +319,7 @@ def run_llama_cpp_fallback(prompt):
     """Respaldo mediante llama-cpp-python"""
     try:
         from llama_cpp import Llama
-        if not os.path.exists(MODEL_PATH):
+        if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 10000000:
             return None
         llm = Llama(model_path=MODEL_PATH, n_ctx=2048, verbose=False)
         prompt_formatted = f"<|im_start|>system\n{get_system_prompt()}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -277,7 +329,8 @@ def run_llama_cpp_fallback(prompt):
             temperature=0.3,
             stop=["<|im_end|>", "<|im_start|>"]
         )
-        return output["choices"][0]["text"].strip()
+        raw_text = output["choices"][0]["text"].strip()
+        return strip_think_tags(raw_text)
     except Exception:
         return None
 
