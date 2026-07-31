@@ -95,7 +95,7 @@ else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
 
-echo "[3/4] Configurando ejecutable nativo Wiguel-AI y motor de respaldo..."
+echo "[3/4] Configurando ejecutable nativo Wiguel-AI y motor inteligente..."
 
 cat << 'EOF' > "$INSTALL_DIR/wiguel_runner.py"
 #!/usr/bin/env python3
@@ -137,120 +137,114 @@ def check_ollama_status():
     except Exception:
         return False
 
+def get_available_models():
+    """Retorna lista de nombres de modelos disponibles en Ollama"""
+    try:
+        req = urllib.request.Request("http://localhost:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return [m.get("name", "") for m in data.get("models", [])]
+    except Exception:
+        return []
+
 def ensure_ollama_model():
-    """Registra el modelo GGUF local en Ollama como 'wiguel-ai'."""
+    """Garantiza que Ollama tenga un modelo operativo disponible (wiguel-ai o llama3.2)."""
     if not check_ollama_status():
         return False
         
-    try:
-        req = urllib.request.Request("http://localhost:11434/api/tags")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            models = [m.get("name", "") for m in data.get("models", [])]
-            if any("wiguel-ai" in m for m in models):
-                return True
-    except Exception:
-        pass
+    models = get_available_models()
+    if any("wiguel-ai" in m for m in models):
+        return "wiguel-ai"
+    if len(models) > 0:
+        return models[0]
 
     sys_prompt = get_system_prompt()
-    if os.path.exists(MODEL_PATH):
-        modelfile_content = f"FROM {MODEL_PATH}\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
-    else:
-        modelfile_content = f"FROM llama3.2\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
-
-    try:
-        url = "http://localhost:11434/api/create"
-        payload = {
-            "model": "wiguel-ai",
-            "modelfile": modelfile_content,
-            "stream": False
-        }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return resp.status == 200
-    except Exception:
-        pass
-    return False
-
-def query_ollama_stream(messages):
-    """Consulta el modelo Wiguel-AI en Ollama con streaming."""
-    if not check_ollama_status():
-        return False
-
-    ensure_ollama_model()
-
-    url = "http://localhost:11434/api/chat"
-    payload = {
-        "model": "wiguel-ai",
-        "messages": messages,
-        "stream": True,
-        "options": {
-            "temperature": 0.3,
-            "num_ctx": 2048,
-            "num_predict": 1024
-        }
-    }
-
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        in_think = False
-        think_buffer = ""
-        full_response = ""
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            for line in resp:
-                if not line:
-                    continue
-                try:
-                    chunk = json.loads(line.decode("utf-8"))
-                    text_chunk = chunk.get("message", {}).get("content", "")
-                    if text_chunk:
-                        if "<think>" in text_chunk:
-                            in_think = True
-                            text_chunk = text_chunk.split("<think>")[0]
-                        
-                        if in_think:
-                            think_buffer += text_chunk
-                            if "</think>" in think_buffer:
-                                text_chunk = think_buffer.split("</think>")[-1]
-                                in_think = False
-                                think_buffer = ""
-                            else:
-                                text_chunk = ""
-
-                        if text_chunk and not in_think:
-                            sys.stdout.write(text_chunk)
-                            sys.stdout.flush()
-                            full_response += text_chunk
-                    
-                    if chunk.get("done", False):
-                        break
-                except Exception:
-                    pass
-            print()
-            return full_response if full_response else True
-    except Exception:
+    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1000000:
         try:
-            gen_url = "http://localhost:11434/api/generate"
-            flat_prompt = messages[-1]["content"] if messages else "Hola"
-            gen_payload = {
+            modelfile_content = f"FROM {MODEL_PATH}\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
+            url = "http://localhost:11434/api/create"
+            payload = {
                 "model": "wiguel-ai",
-                "prompt": flat_prompt,
-                "system": get_system_prompt(),
-                "stream": True
+                "modelfile": modelfile_content,
+                "stream": False
             }
             req = urllib.request.Request(
-                gen_url,
-                data=json.dumps(gen_payload).encode("utf-8"),
+                url,
+                data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                if resp.status == 200:
+                    return "wiguel-ai"
+        except Exception:
+            pass
+
+    try:
+        print("[Wiguel-AI] Descargando modelo base 'llama3.2' en Ollama...")
+        req_pull = urllib.request.Request(
+            "http://localhost:11434/api/pull",
+            data=json.dumps({"name": "llama3.2", "stream": False}).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req_pull, timeout=300) as resp:
+            return "llama3.2"
+    except Exception:
+        pass
+
+    models_after = get_available_models()
+    return models_after[0] if models_after else "llama3.2"
+
+def query_ollama_stream(prompt_or_messages):
+    """Consulta el modelo en Ollama con STREAMING activo."""
+    ollama_ok = check_ollama_status()
+    if not ollama_ok:
+        try:
+            env_vars = dict(os.environ)
+            env_vars["OLLAMA_ORIGINS"] = "*"
+            env_vars["OLLAMA_HOST"] = "0.0.0.0"
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env_vars)
+            time.sleep(2)
+            ollama_ok = check_ollama_status()
+        except Exception:
+            pass
+
+    if not ollama_ok:
+        return False
+
+    model_name = ensure_ollama_model() or "llama3.2"
+
+    is_chat = isinstance(prompt_or_messages, list)
+    urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
+    
+    for url in urls:
+        is_chat_endpoint = "chat" in url
+        payload = {
+            "model": model_name,
+            "stream": True,
+            "options": {
+                "temperature": 0.3,
+                "num_ctx": 2048,
+                "num_predict": 1024
+            }
+        }
+        if is_chat_endpoint:
+            payload["messages"] = prompt_or_messages
+        else:
+            if is_chat:
+                flat_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in prompt_or_messages])
+            else:
+                flat_prompt = prompt_or_messages
+            payload["prompt"] = flat_prompt
+            payload["system"] = get_system_prompt()
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            in_think = False
+            think_buffer = ""
             full_response = ""
             with urllib.request.urlopen(req, timeout=300) as resp:
                 for line in resp:
@@ -258,27 +252,47 @@ def query_ollama_stream(messages):
                         continue
                     try:
                         chunk = json.loads(line.decode("utf-8"))
-                        txt = chunk.get("response", "")
-                        if txt:
-                            sys.stdout.write(txt)
-                            sys.stdout.flush()
-                            full_response += txt
+                        text_chunk = chunk.get("message", {}).get("content", "") if is_chat_endpoint else chunk.get("response", "")
+                        if text_chunk:
+                            if "<think>" in text_chunk:
+                                in_think = True
+                                text_chunk = text_chunk.split("<think>")[0]
+                            
+                            if in_think:
+                                think_buffer += text_chunk
+                                if "</think>" in think_buffer:
+                                    text_chunk = think_buffer.split("</think>")[-1]
+                                    in_think = False
+                                    think_buffer = ""
+                                else:
+                                    text_chunk = ""
+
+                            if text_chunk and not in_think:
+                                sys.stdout.write(text_chunk)
+                                sys.stdout.flush()
+                                full_response += text_chunk
+                        
+                        if chunk.get("done", False):
+                            break
                     except Exception:
                         pass
-            print()
-            return full_response if full_response else True
+                print()
+                if full_response:
+                    return full_response
         except Exception:
-            return False
+            continue
+            
+    return False
 
 def query_ollama(prompt):
     """Consulta no-streamed para análisis de archivos."""
     if not check_ollama_status():
         return None
-    ensure_ollama_model()
+    model_name = ensure_ollama_model() or "llama3.2"
 
     url = "http://localhost:11434/api/generate"
     payload = {
-        "model": "wiguel-ai",
+        "model": model_name,
         "prompt": prompt,
         "system": get_system_prompt(),
         "stream": False,
@@ -447,6 +461,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 EOF
 
 # Launcher Script
