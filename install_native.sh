@@ -149,16 +149,34 @@ def get_available_models():
 def ensure_ollama_model():
     """Registra y asegura estrictamente tu modelo Wiguel-AI.gguf en Ollama."""
     if not check_ollama_status():
-        return False
+        return None
         
     models = get_available_models()
-    if any("wiguel-ai" in m for m in models):
-        return "wiguel-ai"
+    for m in models:
+        if "wiguel-ai" in m.lower():
+            return m
 
     sys_prompt = get_system_prompt()
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1000000:
+        # 1. Intentar con CLI 'ollama create wiguel-ai -f Modelfile' (Más confiable en Ollama / Termux)
         try:
-            modelfile_content = f"FROM {MODEL_PATH}\nSYSTEM \"\"\"{sys_prompt}\"\"\"\nPARAMETER temperature 0.3"
+            mf_path = os.path.join(INSTALL_DIR, "Modelfile")
+            with open(mf_path, "w", encoding="utf-8") as f:
+                f.write(f'FROM "{MODEL_PATH}"\nSYSTEM """{sys_prompt}"""\nPARAMETER temperature 0.3\n')
+            
+            res = subprocess.run(["ollama", "create", "wiguel-ai", "-f", mf_path], capture_output=True, text=True, timeout=120)
+            if res.returncode == 0 or "success" in res.stdout.lower() or "success" in res.stderr.lower():
+                models = get_available_models()
+                for m in models:
+                    if "wiguel-ai" in m.lower():
+                        return m
+                return "wiguel-ai"
+        except Exception:
+            pass
+
+        # 2. Fallback REST API /api/create
+        try:
+            modelfile_content = f'FROM "{MODEL_PATH}"\nSYSTEM """{sys_prompt}"""\nPARAMETER temperature 0.3'
             url = "http://localhost:11434/api/create"
             payload = {
                 "model": "wiguel-ai",
@@ -176,9 +194,10 @@ def ensure_ollama_model():
         except Exception:
             pass
 
+    models = get_available_models()
     if models:
         return models[0]
-    return "wiguel-ai"
+    return None
 
 def query_ollama_stream(prompt_or_messages):
     """Consulta tu modelo Wiguel-AI en Ollama con streaming."""
@@ -197,109 +216,140 @@ def query_ollama_stream(prompt_or_messages):
     if not ollama_ok:
         return False
 
-    model_name = ensure_ollama_model() or "wiguel-ai"
+    model_name = ensure_ollama_model()
+    if not model_name:
+        return False
+
+    models = get_available_models()
+    candidate_models = [model_name] + [m for m in models if m != model_name]
 
     is_chat = isinstance(prompt_or_messages, list)
     urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
     
-    for url in urls:
-        is_chat_endpoint = "chat" in url
-        payload = {
-            "model": model_name,
-            "stream": True,
-            "options": {
-                "temperature": 0.3,
-                "num_ctx": 2048,
-                "num_predict": 1024
+    for mname in candidate_models:
+        for url in urls:
+            is_chat_endpoint = "chat" in url
+            payload = {
+                "model": mname,
+                "stream": True,
+                "options": {
+                    "temperature": 0.3,
+                    "num_ctx": 2048,
+                    "num_predict": 1024
+                }
             }
-        }
-        if is_chat_endpoint:
-            payload["messages"] = prompt_or_messages
-        else:
-            if is_chat:
-                flat_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in prompt_or_messages])
+            if is_chat_endpoint:
+                if is_chat:
+                    payload["messages"] = prompt_or_messages
+                else:
+                    payload["messages"] = [
+                        {"role": "system", "content": get_system_prompt()},
+                        {"role": "user", "content": prompt_or_messages}
+                    ]
             else:
-                flat_prompt = prompt_or_messages
-            payload["prompt"] = flat_prompt
-            payload["system"] = get_system_prompt()
+                if is_chat:
+                    flat_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in prompt_or_messages])
+                else:
+                    flat_prompt = prompt_or_messages
+                payload["prompt"] = flat_prompt
+                payload["system"] = get_system_prompt()
 
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"}
-            )
-            in_think = False
-            think_buffer = ""
-            full_response = ""
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                for line in resp:
-                    if not line:
-                        continue
-                    try:
-                        chunk = json.loads(line.decode("utf-8"))
-                        text_chunk = chunk.get("message", {}).get("content", "") if is_chat_endpoint else chunk.get("response", "")
-                        if text_chunk:
-                            if "<think>" in text_chunk:
-                                in_think = True
-                                text_chunk = text_chunk.split("<think>")[0]
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                in_think = False
+                think_buffer = ""
+                full_response = ""
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    for line in resp:
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line.decode("utf-8"))
+                            text_chunk = chunk.get("message", {}).get("content", "") if is_chat_endpoint else chunk.get("response", "")
+                            if text_chunk:
+                                if "<think>" in text_chunk:
+                                    in_think = True
+                                    text_chunk = text_chunk.split("<think>")[0]
+                                
+                                if in_think:
+                                    think_buffer += text_chunk
+                                    if "</think>" in think_buffer:
+                                        text_chunk = think_buffer.split("</think>")[-1]
+                                        in_think = False
+                                        think_buffer = ""
+                                    else:
+                                        text_chunk = ""
+
+                                if text_chunk and not in_think:
+                                    sys.stdout.write(text_chunk)
+                                    sys.stdout.flush()
+                                    full_response += text_chunk
                             
-                            if in_think:
-                                think_buffer += text_chunk
-                                if "</think>" in think_buffer:
-                                    text_chunk = think_buffer.split("</think>")[-1]
-                                    in_think = False
-                                    think_buffer = ""
-                                else:
-                                    text_chunk = ""
-
-                            if text_chunk and not in_think:
-                                sys.stdout.write(text_chunk)
-                                sys.stdout.flush()
-                                full_response += text_chunk
-                        
-                        if chunk.get("done", False):
-                            break
-                    except Exception:
-                        pass
-                print()
-                if full_response:
-                    return full_response
-        except Exception:
-            continue
+                            if chunk.get("done", False):
+                                break
+                        except Exception:
+                            pass
+                    print()
+                    if full_response:
+                        return full_response
+            except Exception:
+                continue
             
     return False
 
 def query_ollama(prompt):
     """Consulta no-streamed para análisis de archivos usando tu modelo."""
-    if not check_ollama_status():
-        return None
-    model_name = ensure_ollama_model() or "wiguel-ai"
+    if check_ollama_status():
+        model_name = ensure_ollama_model()
+        if model_name:
+            models = get_available_models()
+            candidate_models = [model_name] + [m for m in models if m != model_name]
 
-    url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "system": get_system_prompt(),
-        "stream": False,
-        "options": {
-            "temperature": 0.3,
-            "num_ctx": 2048
-        }
-    }
-    try:
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            raw = res.get("response", "").strip()
-            clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
-            return clean if clean else raw
-    except Exception:
-        return None
+            urls = ["http://localhost:11434/api/chat", "http://localhost:11434/api/generate"]
+
+            for mname in candidate_models:
+                for url in urls:
+                    is_chat_endpoint = "chat" in url
+                    payload = {
+                        "model": mname,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.3,
+                            "num_ctx": 2048
+                        }
+                    }
+                    if is_chat_endpoint:
+                        payload["messages"] = [
+                            {"role": "system", "content": get_system_prompt()},
+                            {"role": "user", "content": prompt}
+                        ]
+                    else:
+                        payload["prompt"] = prompt
+                        payload["system"] = get_system_prompt()
+
+                    try:
+                        req = urllib.request.Request(
+                            url,
+                            data=json.dumps(payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json"}
+                        )
+                        with urllib.request.urlopen(req, timeout=300) as resp:
+                            res = json.loads(resp.read().decode("utf-8"))
+                            raw = res.get("message", {}).get("content", "") if is_chat_endpoint else res.get("response", "")
+                            if not raw and "response" in res:
+                                raw = res.get("response", "")
+                            raw = str(raw).strip()
+                            clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
+                            if clean or raw:
+                                return clean if clean else raw
+                    except Exception:
+                        continue
+
+    return run_llama_cpp_fallback(prompt)
 
 def run_llama_cpp_fallback(prompt):
     """Respaldo directo mediante llama-cpp-python usando tu Wiguel-AI.gguf"""
@@ -316,7 +366,7 @@ def run_llama_cpp_fallback(prompt):
             stop=["<|im_end|>", "<|im_start|>"]
         )
         raw = output["choices"][0]["text"].strip()
-        clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
+        clean = re.sub(r'<think>[\s\S]*?\x3c/think>', '', raw).strip()
         return clean if clean else raw
     except Exception:
         return None
@@ -364,7 +414,7 @@ def main():
             else:
                 print("   [Estado Servidor]: (Modo Respaldo GGUF directo activado)")
                 
-        print("   Escribe 'exit' o 'salir' para finalizar")
+        print("   Escribe 'exit' o 'salir' for finalizar")
         print("==================================================")
         
         chat_history = [{"role": "system", "content": get_system_prompt()}]
@@ -419,82 +469,7 @@ def main():
                 if not raw_res:
                     raw_res = run_llama_cpp_fallback(prompt)
                 
-                if raw_res and "risk_score" in raw_res:
+                if raw_res and ("risk_score" in raw_res or "{" in raw_res):
                     print(raw_res)
                 else:
-                    content_lower = content.lower()
-                    suspicious = ['eval(', 'base64_decode', 'powershell -e', 'wget http', 'curl http', 'rm -rf /', 'drop table', '<script>']
-                    found = [term for term in suspicious if term in content_lower]
-                    score = 95 if len(found) >= 2 or 'powershell -e' in content_lower else (45 if len(found) == 1 else 0)
-                    is_safe = score < 50
-                    
-                    result = {
-                        "risk_score": score,
-                        "is_safe": is_safe,
-                        "status_title": "0% Riesgo - Archivo Seguro" if is_safe else "Amenaza Detectada (Riesgo Alto)",
-                        "explanation": f"Análisis de '{filename}': " + 
-                                       ("Sin firmas ni comportamientos sospechosos." if is_safe else f"Patrones detectados: {', '.join(found)}."),
-                        "detected_patterns": found if found else ["Estructura limpia"]
-                    }
-                    print(json.dumps(result, indent=2, ensure_ascii=False))
-            except Exception as e:
-                print(json.dumps({"error": f"Error leyendo archivo: {e}"}))
-        else:
-            print(json.dumps({"error": f"Archivo no encontrado: {file_target}"}))
-    else:
-        print("Comando no reconocido o faltan argumentos.")
-        print("Uso: wiguel-ai --chat  O  wiguel-ai --analyze <archivo>")
-
-if __name__ == "__main__":
-    main()
-EOF
-
-# Launcher Script
-cat << 'EOF' > "$BIN_DIR/wiguel-ai"
-#!/usr/bin/env bash
-export OLLAMA_ORIGINS="*"
-export OLLAMA_HOST="0.0.0.0"
-PYTHON_BIN=$(command -v python3 || command -v python)
-SCRIPT_PATH="$HOME/.wiguel-ai/wiguel_runner.py"
-
-if [ ! -f "$SCRIPT_PATH" ]; then
-    echo "Error: No se encuentra $SCRIPT_PATH"
-    exit 1
-fi
-
-"$PYTHON_BIN" "$SCRIPT_PATH" "$@"
-EOF
-
-chmod +x "$BIN_DIR/wiguel-ai"
-
-echo "[4/4] Registrando comando 'wiguel-ai' en tu PATH..."
-SHELL_RC=""
-if [ -n "$TERMUX_VERSION" ]; then
-    SHELL_RC="$HOME/.bashrc"
-    mkdir -p "$HOME/.termux/bin"
-    cp "$BIN_DIR/wiguel-ai" "$HOME/.termux/bin/termux-file-editor" 2>/dev/null || true
-elif [ -f "$HOME/.zshrc" ]; then
-    SHELL_RC="$HOME/.zshrc"
-else
-    SHELL_RC="$HOME/.bashrc"
-fi
-
-if ! grep -q ".wiguel-ai/bin" "$SHELL_RC" 2>/dev/null; then
-    echo 'export PATH="$HOME/.wiguel-ai/bin:$PATH"' >> "$SHELL_RC"
-    echo 'alias wiguel="wiguel-ai"' >> "$SHELL_RC"
-fi
-
-if ! grep -q "OLLAMA_ORIGINS" "$SHELL_RC" 2>/dev/null; then
-    echo 'export OLLAMA_ORIGINS="*"' >> "$SHELL_RC"
-    echo 'export OLLAMA_HOST="0.0.0.0"' >> "$SHELL_RC"
-fi
-
-export OLLAMA_ORIGINS="*"
-export OLLAMA_HOST="0.0.0.0"
-export PATH="$HOME/.wiguel-ai/bin:$PATH"
-
-echo "================================================================="
-echo " ¡Instalación completada con éxito!                               "
-echo " Inicia 'ollama serve' en tu terminal y prueba:                  "
-echo " wiguel-ai --chat  O  wiguel-ai --analyze <archivo>              "
-echo "================================================================="
+                    con
