@@ -34,6 +34,7 @@ if ! command -v ollama &> /dev/null; then
     echo "Instalando Ollama..."
     if command -v pkg &> /dev/null; then
         echo "Nota: Ollama no cuenta con paquete oficial en Termux, se utilizará el motor de inferencia de respaldo GGUF."
+        pkg install -y clang cmake make python3-dev || true
     elif command -v brew &> /dev/null; then
         brew install ollama || curl -fsSL https://ollama.com/install.sh | sh || true
     else
@@ -42,7 +43,14 @@ if ! command -v ollama &> /dev/null; then
     fi
 fi
 
-echo "[2/4] Descargando tu modelo exclusivo Wiguel-AI.gguf desde Hugging Face..."
+echo "[2/5] Instalando librería de respaldo llama-cpp-python..."
+PYTHON_BIN=$(command -v python3 || command -v python || echo "")
+if [ -n "$PYTHON_BIN" ]; then
+    $PYTHON_BIN -m pip install --upgrade pip || true
+    $PYTHON_BIN -m pip install llama-cpp-python || echo "Aviso: llama-cpp-python no se pudo instalar (puede faltar compilador de C++). Se intentará usar Ollama."
+fi
+
+echo "[3/5] Descargando tu modelo exclusivo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
 FILE_SIZE=0
 if [ -f "$MODEL_FILE" ]; then
@@ -94,7 +102,7 @@ else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
 
-echo "[3/4] Configurando ejecutable nativo Wiguel-AI con tu modelo GGUF..."
+echo "[4/5] Configurando ejecutable nativo Wiguel-AI con tu modelo GGUF..."
 
 cat << 'EOF' > "$INSTALL_DIR/wiguel_runner.py"
 #!/usr/bin/env python3
@@ -168,21 +176,26 @@ def ensure_ollama_model():
             ollama_bin = shutil.which("ollama") or "ollama"
             res = subprocess.run([ollama_bin, "create", "wiguel-ai", "-f", mf_path], capture_output=True, text=True)
             if res.returncode == 0:
-                print("[Wiguel-AI] Modelo registrado con éxito.")
+                print("[Wiguel-AI] Modelo registrado con éxito desde archivo local.")
                 return "wiguel-ai"
             else:
                 print(f"[Error Ollama Create]: {res.stderr}")
+                print("[Wiguel-AI] Intentando usar la integración nativa de Ollama con Hugging Face...")
+                
+                with open(mf_path, "w", encoding="utf-8") as f:
+                    f.write(f'FROM hf.co/unsloth/Phi-4-mini-instruct-GGUF\nSYSTEM """{sys_prompt}"""\nPARAMETER temperature 0.3\n')
+                
+                res_hf = subprocess.run([ollama_bin, "create", "wiguel-ai", "-f", mf_path], capture_output=True, text=True)
+                if res_hf.returncode == 0:
+                    print("[Wiguel-AI] Modelo registrado con éxito desde Hugging Face.")
+                    return "wiguel-ai"
+                else:
+                    print(f"[Error Ollama Create HF]: {res_hf.stderr}")
         except Exception as e:
             print(f"[Error Ollama Create Exception]: {e}")
 
-    # Fallback a otros modelos
-    models = get_available_models()
-    if models:
-        print(f"[Wiguel-AI] Usando modelo alternativo detectado: {models[0]}")
-        return models[0]
-    
-    print("[Error] No se pudo registrar Wiguel-AI y no hay otros modelos disponibles.")
-    print("Por favor, ejecuta manualmente en otra terminal: ollama run llama3")
+    print("[Error] Ollama rechazó el archivo GGUF.")
+    print("[Wiguel-AI] Forzando el uso de llama-cpp-python como motor de inferencia...")
     return None
 
 def query_ollama_stream(prompt_or_messages):
@@ -315,14 +328,22 @@ def query_ollama(prompt):
 
     return run_llama_cpp_fallback(prompt)
 
-def run_llama_cpp_fallback(prompt):
+def run_llama_cpp_fallback(prompt_or_messages):
     """Respaldo directo mediante llama-cpp-python usando tu Wiguel-AI.gguf"""
     try:
         from llama_cpp import Llama
         if not os.path.exists(MODEL_PATH):
             return None
         llm = Llama(model_path=MODEL_PATH, n_ctx=4096, verbose=False)
-        prompt_formatted = f"<|im_start|>system\n{get_system_prompt()}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        
+        prompt_formatted = ""
+        if isinstance(prompt_or_messages, list):
+            for m in prompt_or_messages:
+                prompt_formatted += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n"
+            prompt_formatted += "<|im_start|>assistant\n"
+        else:
+            prompt_formatted = f"<|im_start|>system\n{get_system_prompt()}<|im_end|>\n<|im_start|>user\n{prompt_or_messages}<|im_end|>\n<|im_start|>assistant\n"
+            
         output = llm(
             prompt_formatted,
             max_tokens=1024,
@@ -332,7 +353,8 @@ def run_llama_cpp_fallback(prompt):
         raw = output["choices"][0]["text"].strip()
         clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
         return clean if clean else raw
-    except Exception:
+    except Exception as e:
+        print(f"\n[Error llama-cpp-python]: {e}")
         return None
 
 def main():
@@ -398,13 +420,13 @@ def main():
                     assistant_text = resp_val if isinstance(resp_val, str) else "OK"
                     chat_history.append({"role": "assistant", "content": assistant_text})
                 else:
-                    chat_history.pop()
-                    response_text = run_llama_cpp_fallback(user_input)
+                    response_text = run_llama_cpp_fallback(chat_history)
                     if response_text:
                         print(f"{response_text}\n")
                         chat_history.append({"role": "assistant", "content": response_text})
                     else:
-                        print("\n[Error Wiguel-AI]: Asegúrate de ejecutar 'ollama serve' en otra terminal.\n")
+                        chat_history.pop()
+                        print("\n[Error Wiguel-AI]: Falló la inferencia local. Asegúrate de tener instalada la librería llama-cpp-python (pip install llama-cpp-python).\n")
             except KeyboardInterrupt:
                 print("\nSesión terminada.")
                 break
@@ -476,7 +498,7 @@ EOF
 
 chmod +x "$BIN_DIR/wiguel-ai"
 
-echo "[4/4] Registrando comando 'wiguel-ai' en tu PATH..."
+echo "[5/5] Registrando comando 'wiguel-ai' en tu PATH..."
 SHELL_RC=""
 if [ -n "$TERMUX_VERSION" ]; then
     SHELL_RC="$HOME/.bashrc"
