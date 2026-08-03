@@ -43,11 +43,16 @@ if ! command -v ollama &> /dev/null; then
     fi
 fi
 
-echo "[2/5] Instalando librería de respaldo llama-cpp-python..."
+echo "[2/5] Comprobando librería de respaldo llama-cpp-python..."
 PYTHON_BIN=$(command -v python3 || command -v python || echo "")
 if [ -n "$PYTHON_BIN" ]; then
-    $PYTHON_BIN -m pip install --upgrade pip || true
-    $PYTHON_BIN -m pip install llama-cpp-python || echo "Aviso: llama-cpp-python no se pudo instalar (puede faltar compilador de C++). Se intentará usar Ollama."
+    if $PYTHON_BIN -c "import llama_cpp" &> /dev/null; then
+        echo "✓ llama-cpp-python ya está instalada."
+    else
+        echo "Instalando llama-cpp-python (esto puede tardar y no mostrar progreso)..."
+        $PYTHON_BIN -m pip install --upgrade pip > /dev/null 2>&1 || true
+        $PYTHON_BIN -m pip install llama-cpp-python > /dev/null 2>&1 || echo "Aviso: llama-cpp-python no se pudo instalar (puede faltar compilador de C++). Se intentará usar Ollama."
+    fi
 fi
 
 echo "[3/5] Descargando tu modelo exclusivo Wiguel-AI.gguf desde Hugging Face..."
@@ -63,34 +68,24 @@ if [ "$FILE_SIZE" -lt 1000000 ]; then
     
     DOWNLOAD_SUCCESS=false
     
-    if command -v curl &> /dev/null; then
-        echo "⚡ Descargando con curl..."
-        curl -sSL -A "Mozilla/5.0" -L --retry 5 --retry-delay 2 "$MODEL_URL" -o "$MODEL_FILE" --progress-bar || true
-        NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
-        if [ "$NEW_SIZE" -gt 1000000 ]; then
-            DOWNLOAD_SUCCESS=true
-        fi
-    fi
-    
-    if [ "$DOWNLOAD_SUCCESS" = false ] && command -v wget &> /dev/null; then
-        echo "⚡ Reintentando descarga con wget..."
+    if command -v wget &> /dev/null; then
+        echo "⚡ Descargando con wget..."
         wget --user-agent="Mozilla/5.0" -q --show-progress -O "$MODEL_FILE" "$MODEL_URL" || true
         NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
         if [ "$NEW_SIZE" -gt 1000000 ]; then
             DOWNLOAD_SUCCESS=true
         fi
+    else
+        echo "❌ Error: 'wget' no está instalado. Por favor, instala wget para continuar la descarga."
+        echo "Ubuntu/Debian: sudo apt install wget"
+        echo "Mac: brew install wget"
+        echo "Termux: pkg install wget"
+        exit 1
     fi
 
     if [ "$DOWNLOAD_SUCCESS" = false ]; then
-        echo "⚡ Reintentando descarga con Python..."
-        PYTHON_BIN=$(command -v python3 || command -v python || echo "")
-        if [ -n "$PYTHON_BIN" ]; then
-            $PYTHON_BIN -c "import urllib.request; req=urllib.request.Request('$MODEL_URL', headers={'User-Agent':'Mozilla/5.0'}); res=urllib.request.urlopen(req); open('$MODEL_FILE','wb').write(res.read())" || true
-            NEW_SIZE=$(wc -c < "$MODEL_FILE" 2>/dev/null | tr -d ' ' || echo 0)
-            if [ "$NEW_SIZE" -gt 1000000 ]; then
-                DOWNLOAD_SUCCESS=true
-            fi
-        fi
+        echo "❌ Error: Falló la descarga del modelo con wget."
+        exit 1
     fi
 
     if [ "$DOWNLOAD_SUCCESS" = true ]; then
@@ -102,7 +97,49 @@ else
     echo "✓ Modelo Wiguel-AI.gguf ya existe localmente en $MODEL_FILE"
 fi
 
-echo "[4/5] Configurando ejecutable nativo Wiguel-AI con tu modelo GGUF..."
+echo "[4/5] Configurando y registrando modelo nativo Wiguel-AI..."
+
+if command -v ollama &> /dev/null; then
+    OLLAMA_STARTED=false
+    if ! command -v curl &> /dev/null || ! curl -s http://localhost:11434/api/tags &> /dev/null; then
+        echo "Iniciando servicio Ollama temporalmente para registrar el modelo..."
+        ollama serve > /dev/null 2>&1 &
+        OLLAMA_PID=$!
+        OLLAMA_STARTED=true
+        sleep 4
+    fi
+
+    if ! ollama list 2>/dev/null | grep -q -i "wiguel-ai"; then
+        echo "Registrando modelo GGUF en Ollama (esto puede tardar unos minutos)..."
+        cat << EOF > "$MODEL_DIR/Modelfile"
+FROM "$MODEL_FILE"
+SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI model built for threat analysis, code auditing, vulnerability identification, and interactive chat. DO NOT print output internal reasoning or <think> blocks. Give your final helpful answer directly."""
+PARAMETER temperature 0.3
+EOF
+        
+        if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" > /dev/null 2>&1; then
+            echo "✓ Modelo registrado con éxito en Ollama."
+        else
+            echo "Aviso: Error al registrar GGUF local. Intentando descargar base desde Hugging Face..."
+            cat << EOF > "$MODEL_DIR/Modelfile"
+FROM hf.co/unsloth/Phi-4-mini-instruct-GGUF
+SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI model built for threat analysis, code auditing, vulnerability identification, and interactive chat. DO NOT print output internal reasoning or <think> blocks. Give your final helpful answer directly."""
+PARAMETER temperature 0.3
+EOF
+            if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" > /dev/null 2>&1; then
+                echo "✓ Modelo registrado con éxito desde Hugging Face."
+            else
+                echo "Aviso: No se pudo registrar el modelo en Ollama. Se usará el motor GGUF de respaldo si está disponible."
+            fi
+        fi
+    else
+        echo "✓ El modelo wiguel-ai ya está registrado en Ollama."
+    fi
+
+    if [ "$OLLAMA_STARTED" = true ] && [ -n "$OLLAMA_PID" ]; then
+        kill $OLLAMA_PID 2>/dev/null || true
+    fi
+fi
 
 cat << 'EOF' > "$INSTALL_DIR/wiguel_runner.py"
 #!/usr/bin/env python3
@@ -156,7 +193,7 @@ def get_available_models():
         return []
 
 def ensure_ollama_model():
-    """Registra y asegura estrictamente tu modelo Wiguel-AI.gguf en Ollama."""
+    """Verifica que tu modelo Wiguel-AI esté registrado en Ollama."""
     if not check_ollama_status():
         return None
         
@@ -165,37 +202,8 @@ def ensure_ollama_model():
         if "wiguel-ai" in m.lower():
             return m
 
-    sys_prompt = get_system_prompt()
-    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1000000:
-        print("[Wiguel-AI] Registrando modelo GGUF en Ollama. Esto puede tardar unos minutos...")
-        try:
-            mf_path = os.path.join(INSTALL_DIR, "Modelfile")
-            with open(mf_path, "w", encoding="utf-8") as f:
-                f.write(f'FROM "{MODEL_PATH}"\nSYSTEM """{sys_prompt}"""\nPARAMETER temperature 0.3\n')
-            
-            ollama_bin = shutil.which("ollama") or "ollama"
-            res = subprocess.run([ollama_bin, "create", "wiguel-ai", "-f", mf_path], capture_output=True, text=True)
-            if res.returncode == 0:
-                print("[Wiguel-AI] Modelo registrado con éxito desde archivo local.")
-                return "wiguel-ai"
-            else:
-                print(f"[Error Ollama Create]: {res.stderr}")
-                print("[Wiguel-AI] Intentando usar la integración nativa de Ollama con Hugging Face...")
-                
-                with open(mf_path, "w", encoding="utf-8") as f:
-                    f.write(f'FROM hf.co/unsloth/Phi-4-mini-instruct-GGUF\nSYSTEM """{sys_prompt}"""\nPARAMETER temperature 0.3\n')
-                
-                res_hf = subprocess.run([ollama_bin, "create", "wiguel-ai", "-f", mf_path], capture_output=True, text=True)
-                if res_hf.returncode == 0:
-                    print("[Wiguel-AI] Modelo registrado con éxito desde Hugging Face.")
-                    return "wiguel-ai"
-                else:
-                    print(f"[Error Ollama Create HF]: {res_hf.stderr}")
-        except Exception as e:
-            print(f"[Error Ollama Create Exception]: {e}")
-
-    print("[Error] Ollama rechazó el archivo GGUF.")
-    print("[Wiguel-AI] Forzando el uso de llama-cpp-python como motor de inferencia...")
+    print("[Wiguel-AI] Aviso: Modelo wiguel-ai no detectado en Ollama (es posible que haya fallado la importación nativa).")
+    print("[Wiguel-AI] Forzando el uso del motor de inferencia local GGUF de respaldo...")
     return None
 
 def query_ollama_stream(prompt_or_messages):
