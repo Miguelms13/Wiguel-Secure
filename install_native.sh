@@ -33,8 +33,7 @@ fi
 if ! command -v ollama &> /dev/null; then
     echo "Instalando Ollama..."
     if command -v pkg &> /dev/null; then
-        echo "Nota: Ollama no cuenta con paquete oficial en Termux, se utilizará el motor de inferencia de respaldo GGUF."
-        pkg install -y clang cmake make python3-dev || true
+        echo "Nota: Ollama no cuenta con paquete oficial en Termux. Se recomienda instalar llama.cpp compilado nativamente o usar un entorno PRoot."
     elif command -v brew &> /dev/null; then
         brew install ollama || curl -fsSL https://ollama.com/install.sh | sh || true
     else
@@ -43,17 +42,8 @@ if ! command -v ollama &> /dev/null; then
     fi
 fi
 
-echo "[2/5] Comprobando librería de respaldo llama-cpp-python..."
+echo "[2/5] Comprobando entorno..."
 PYTHON_BIN=$(command -v python3 || command -v python || echo "")
-if [ -n "$PYTHON_BIN" ]; then
-    if $PYTHON_BIN -c "import llama_cpp" &> /dev/null; then
-        echo "✓ llama-cpp-python ya está instalada."
-    else
-        echo "Instalando llama-cpp-python (esto puede tardar y no mostrar progreso)..."
-        $PYTHON_BIN -m pip install --upgrade pip > /dev/null 2>&1 || true
-        $PYTHON_BIN -m pip install llama-cpp-python > /dev/null 2>&1 || echo "Aviso: llama-cpp-python no se pudo instalar (puede faltar compilador de C++). Se intentará usar Ollama."
-    fi
-fi
 
 echo "[3/5] Descargando tu modelo exclusivo Wiguel-AI.gguf desde Hugging Face..."
 MODEL_FILE="$MODEL_DIR/Wiguel-AI.gguf"
@@ -103,7 +93,7 @@ if command -v ollama &> /dev/null; then
     OLLAMA_STARTED=false
     if ! command -v curl &> /dev/null || ! curl -s http://localhost:11434/api/tags &> /dev/null; then
         echo "Iniciando servicio Ollama temporalmente para registrar el modelo..."
-        ollama serve > /dev/null 2>&1 &
+        ollama serve  &
         OLLAMA_PID=$!
         OLLAMA_STARTED=true
         sleep 4
@@ -117,7 +107,7 @@ SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI mo
 PARAMETER temperature 0.3
 EOF
         
-        if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" > /dev/null 2>&1; then
+        if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" ; then
             echo "✓ Modelo registrado con éxito en Ollama."
         else
             echo "Aviso: Error al registrar GGUF local. Intentando descargar base desde Hugging Face..."
@@ -126,10 +116,10 @@ FROM hf.co/unsloth/Phi-4-mini-instruct-GGUF
 SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI model built for threat analysis, code auditing, vulnerability identification, and interactive chat. DO NOT print output internal reasoning or <think> blocks. Give your final helpful answer directly."""
 PARAMETER temperature 0.3
 EOF
-            if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" > /dev/null 2>&1; then
+            if ollama create wiguel-ai -f "$MODEL_DIR/Modelfile" ; then
                 echo "✓ Modelo registrado con éxito desde Hugging Face."
             else
-                echo "Aviso: No se pudo registrar el modelo en Ollama. Se usará el motor GGUF de respaldo si está disponible."
+                echo "Aviso: No se pudo registrar el modelo en Ollama. Asegúrate de tener Ollama funcionando."
             fi
         fi
     else
@@ -202,8 +192,7 @@ def ensure_ollama_model():
         if "wiguel-ai" in m.lower():
             return m
 
-    print("[Wiguel-AI] Aviso: Modelo wiguel-ai no detectado en Ollama (es posible que haya fallado la importación nativa).")
-    print("[Wiguel-AI] Forzando el uso del motor de inferencia local GGUF de respaldo...")
+    print("[Wiguel-AI] Aviso: Modelo wiguel-ai no detectado en Ollama. Por favor ejecuta 'ollama create wiguel-ai -f ~/.wiguel-ai/models/Modelfile' manualmente.")
     return None
 
 def query_ollama_stream(prompt_or_messages):
@@ -337,33 +326,9 @@ def query_ollama(prompt):
     return run_llama_cpp_fallback(prompt)
 
 def run_llama_cpp_fallback(prompt_or_messages):
-    """Respaldo directo mediante llama-cpp-python usando tu Wiguel-AI.gguf"""
-    try:
-        from llama_cpp import Llama
-        if not os.path.exists(MODEL_PATH):
-            return None
-        llm = Llama(model_path=MODEL_PATH, n_ctx=4096, verbose=False)
-        
-        prompt_formatted = ""
-        if isinstance(prompt_or_messages, list):
-            for m in prompt_or_messages:
-                prompt_formatted += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n"
-            prompt_formatted += "<|im_start|>assistant\n"
-        else:
-            prompt_formatted = f"<|im_start|>system\n{get_system_prompt()}<|im_end|>\n<|im_start|>user\n{prompt_or_messages}<|im_end|>\n<|im_start|>assistant\n"
-            
-        output = llm(
-            prompt_formatted,
-            max_tokens=1024,
-            temperature=0.3,
-            stop=["<|im_end|>", "<|im_start|>"]
-        )
-        raw = output["choices"][0]["text"].strip()
-        clean = re.sub(r'<think>[\s\S]*?</think>', '', raw).strip()
-        return clean if clean else raw
-    except Exception as e:
-        print(f"\n[Error llama-cpp-python]: {e}")
-        return None
+    """Fallback si falla Ollama"""
+    sys.stderr.write("\n[Error Wiguel-AI]: Falló la inferencia local con Ollama. Asegúrate de tener Ollama corriendo ('ollama serve').\n")
+    return None
 
 def main():
     args = sys.argv[1:]
@@ -403,7 +368,7 @@ def main():
             if check_ollama_status():
                 print("   [Estado Servidor]: Ollama Serve -> ACTIVO (http://localhost:11434)")
             else:
-                print("   [Estado Servidor]: (Modo Respaldo GGUF directo activado)")
+                print("   [Estado Servidor]: ⚠️ 'ollama serve' falló. Por favor, inícialo manualmente.")
                 
         print("   Escribe 'exit' o 'salir' para finalizar")
         print("==================================================")
@@ -434,7 +399,7 @@ def main():
                         chat_history.append({"role": "assistant", "content": response_text})
                     else:
                         chat_history.pop()
-                        print("\n[Error Wiguel-AI]: Falló la inferencia local. Asegúrate de tener instalada la librería llama-cpp-python (pip install llama-cpp-python).\n")
+                        print("\n[Error Wiguel-AI]: Falló la inferencia local. Asegúrate de tener Ollama instalado y en ejecución ('ollama serve').\n")
             except KeyboardInterrupt:
                 print("\nSesión terminada.")
                 break
