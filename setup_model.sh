@@ -103,6 +103,21 @@ if command -v ollama &> /dev/null; then
         echo "Registrando modelo GGUF en Ollama (esto puede tardar unos minutos)..."
         cat << EOF > "$MODEL_DIR/Modelfile"
 FROM "$MODEL_FILE"
+TEMPLATE """{{ if .Messages }}
+{{- range .Messages }}
+<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{- end }}
+<|im_start|>assistant
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{- end }}
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+{{- end }}
+"""
 SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI model built for threat analysis, code auditing, vulnerability identification, and interactive chat. DO NOT print output internal reasoning or <think> blocks. Give your final helpful answer directly."""
 PARAMETER temperature 0.3
 EOF
@@ -113,6 +128,21 @@ EOF
             echo "Aviso: Error al registrar GGUF local. Intentando descargar base desde Hugging Face..."
             cat << EOF > "$MODEL_DIR/Modelfile"
 FROM hf.co/unsloth/Phi-4-mini-instruct-GGUF
+TEMPLATE """{{ if .Messages }}
+{{- range .Messages }}
+<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{- end }}
+<|im_start|>assistant
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{- end }}
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+{{- end }}
+"""
 SYSTEM """You are Wiguel-AI, an expert cybersecurity and general reasoning AI model built for threat analysis, code auditing, vulnerability identification, and interactive chat. DO NOT print output internal reasoning or <think> blocks. Give your final helpful answer directly."""
 PARAMETER temperature 0.3
 EOF
@@ -237,9 +267,36 @@ def query_ollama_stream(prompt_or_messages):
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"}
         )
-        in_think = False
-        think_buffer = ""
         full_response = ""
+        clean_printed_len = 0
+        
+        def get_clean_text(text):
+            clean = ""
+            in_t = False
+            i = 0
+            while i < len(text):
+                if not in_t:
+                    if text[i:].startswith("<think>"):
+                        in_t = True
+                        i += 7
+                    else:
+                        partial = False
+                        for j in range(1, 7):
+                            if text[i:] == "<think>"[:j]:
+                                partial = True
+                                break
+                        if partial:
+                            break
+                        clean += text[i]
+                        i += 1
+                else:
+                    if text[i:].startswith("</think>"):
+                        in_t = False
+                        i += 8
+                    else:
+                        i += 1
+            return clean
+
         with urllib.request.urlopen(req, timeout=300) as resp:
             for line in resp:
                 if not line:
@@ -248,23 +305,21 @@ def query_ollama_stream(prompt_or_messages):
                     chunk = json.loads(line.decode("utf-8"))
                     text_chunk = chunk.get("message", {}).get("content", "") if is_chat else chunk.get("response", "")
                     if text_chunk:
-                        if "<think>" in text_chunk:
-                            in_think = True
-                            text_chunk = text_chunk.split("<think>")[0]
+                        full_response += text_chunk
+                        clean_text = get_clean_text(full_response)
                         
-                        if in_think:
-                            think_buffer += text_chunk
-                            if "</think>" in think_buffer:
-                                text_chunk = think_buffer.split("</think>")[-1]
-                                in_think = False
-                                think_buffer = ""
-                            else:
-                                text_chunk = ""
-
-                        if text_chunk and not in_think:
-                            sys.stdout.write(text_chunk)
+                        # Strip Wiguel-AI> prefix if the model hallucinates it
+                        if clean_printed_len == 0:
+                            c_strip = clean_text.lstrip()
+                            if c_strip.startswith("Wiguel-AI>"):
+                                offset = len(clean_text) - len(c_strip) + 10
+                                clean_text = clean_text[:offset] + clean_text[offset:].lstrip()
+                        
+                        if len(clean_text) > clean_printed_len:
+                            new_text = clean_text[clean_printed_len:]
+                            sys.stdout.write(new_text)
                             sys.stdout.flush()
-                            full_response += text_chunk
+                            clean_printed_len = len(clean_text)
                     
                     if chunk.get("done", False):
                         break
@@ -272,7 +327,7 @@ def query_ollama_stream(prompt_or_messages):
                     pass
             print()
             if full_response:
-                return full_response
+                return get_clean_text(full_response)
     except urllib.error.HTTPError as e:
         print(f"\n[HTTP Error Ollama]: {e.code} - {e.reason}")
         try:
